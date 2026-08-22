@@ -2,9 +2,10 @@
   "name": "browser-panel",
   "displayName": "Browser Panel",
   "description": "Embedded browser for the VS Code bottom panel / secondary sidebar. Address bar, reload, DevTools (F12) and open-in-external-browser. Defaults to http://localhost:80 for local development preview.",
-  "version": "0.3.14",
+  "version": "0.3.15",
   "publisher": "artin",
   "license": "MIT",
+  "icon": "resources/icon.png",
   "repository": {
     "type": "git",
     "url": "https://github.com/artin/browser-panel"

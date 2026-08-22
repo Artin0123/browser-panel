@@ -2,6 +2,8 @@
 
 Embedded browser for the VS Code **bottom panel / secondary sidebar** — defaults to `http://localhost:80` for local development preview.
 
+<img src="https://i.ibb.co/Z6yFRLLH/Pix-Pin-2026-08-22-18-26-26.jpg" alt="Pix Pin 2026 08 22 18 26 26" border="0">
+
 ## Features
 
 - Opens in the **bottom panel**; drag the tab to the **secondary sidebar** (VS Code built-in behavior)

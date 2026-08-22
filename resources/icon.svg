@@ -1,5 +1,9 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" width="24" height="24">
-  <circle cx="12" cy="12" r="10" fill="none" stroke="#C5C5C5" stroke-width="2"/>
-  <ellipse cx="12" cy="12" rx="4.5" ry="10" fill="none" stroke="#C5C5C5" stroke-width="2"/>
-  <path d="M2 12h20" stroke="#C5C5C5" stroke-width="2"/>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" width="24" height="24" fill="none">
+	<!-- Sidebar / panel glyph: browser chrome. currentColor follows the workbench theme. -->
+	<rect x="3" y="4" width="18" height="16" rx="2" stroke="currentColor" stroke-width="1.75"/>
+	<path d="M3 8.25h18" stroke="currentColor" stroke-width="1.75"/>
+	<circle cx="6.25" cy="6.15" r="0.7" fill="currentColor"/>
+	<circle cx="8.5" cy="6.15" r="0.7" fill="currentColor"/>
+	<circle cx="10.75" cy="6.15" r="0.7" fill="currentColor"/>
+	<rect x="6.5" y="10.5" width="11" height="6.5" rx="1" stroke="currentColor" stroke-width="1.5"/>
 </svg>

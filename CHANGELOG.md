@@ -1,5 +1,11 @@
 # Changelog
 
+## [0.3.15] - 2026-08-22
+
+### Added
+
+- Marketplace / OpenVSX icon (browser window + globe, 128×128 PNG). The panel tab still uses the matching SVG.
+
 ## [0.3.14] - 2026-08-22
 
 ### Fixed
