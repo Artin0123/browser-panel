@@ -1,0 +1,421 @@
+:root {
+	color-scheme: light dark;
+}
+
+/* The hidden attribute must always win over display rules (e.g. .empty-state display:flex). */
+[hidden] {
+	display: none !important;
+}
+
+* {
+	box-sizing: border-box;
+}
+
+html,
+body {
+	margin: 0;
+	padding: 0;
+	height: 100%;
+}
+
+body {
+	display: flex;
+	flex-direction: column;
+	background-color: var(--vscode-panel-background);
+	color: var(--vscode-foreground);
+	font-family: var(--vscode-font-family);
+	font-size: var(--vscode-font-size);
+	overflow: hidden;
+}
+
+/* ------------------------------------------------------------------ toolbar */
+.toolbar {
+	display: flex;
+	align-items: center;
+	gap: 4px;
+	padding: 4px 6px;
+	border-bottom: 1px solid var(--vscode-panel-border);
+	flex: 0 0 auto;
+	position: relative;
+	z-index: 10;
+}
+
+.icon-btn {
+	min-width: 24px;
+	height: 24px;
+	padding: 0;
+	display: inline-flex;
+	align-items: center;
+	justify-content: center;
+	background: none;
+	border: 1px solid transparent;
+	color: var(--vscode-foreground);
+	border-radius: 4px;
+	cursor: pointer;
+	font-size: 13px;
+	line-height: 1;
+}
+
+.icon-btn svg {
+	display: block;
+}
+
+.icon-btn:hover:not(:disabled) {
+	background-color: var(--vscode-toolbar-hoverBackground);
+}
+
+.icon-btn:disabled {
+	opacity: 0.4;
+	cursor: default;
+}
+
+.urlbar {
+	flex: 1 1 auto;
+	min-width: 60px;
+	position: relative;
+	display: flex;
+	align-items: center;
+}
+
+#url-input {
+	flex: 1 1 auto;
+	height: 24px;
+	padding: 0 30px 0 8px;
+	background-color: var(--vscode-input-background);
+	color: var(--vscode-input-foreground);
+	border: 1px solid var(--vscode-input-border, transparent);
+	border-radius: 4px;
+	outline: none;
+}
+
+#url-input:focus {
+	border-color: var(--vscode-focusBorder);
+}
+
+.urlbar-go {
+	position: absolute;
+	right: 2px;
+	top: 50%;
+	transform: translateY(-50%);
+	width: 22px;
+	height: 20px;
+	padding: 0;
+	display: inline-flex;
+	align-items: center;
+	justify-content: center;
+	background: none;
+	border: none;
+	color: var(--vscode-foreground);
+	border-radius: 3px;
+	cursor: pointer;
+	opacity: 0.7;
+}
+
+.urlbar-go:hover {
+	opacity: 1;
+	background-color: var(--vscode-toolbar-hoverBackground);
+}
+
+.menu-wrap {
+	position: relative;
+}
+
+#btn-reload.loading svg {
+	animation: spin 0.8s linear infinite;
+}
+
+@keyframes spin {
+	to {
+		transform: rotate(360deg);
+	}
+}
+
+/* -------------------------------------------------------------------- menu */
+.menu {
+	position: absolute;
+	right: 0;
+	top: calc(100% + 2px);
+	min-width: 220px;
+	max-width: 320px;
+	max-height: 70vh;
+	overflow-y: auto;
+	background-color: var(--vscode-menu-background, var(--vscode-panel-background));
+	color: var(--vscode-menu-foreground, var(--vscode-foreground));
+	border: 1px solid var(--vscode-menu-border, var(--vscode-panel-border));
+	border-radius: 4px;
+	padding: 4px;
+	box-shadow: 0 4px 12px rgba(0, 0, 0, 0.25);
+	z-index: 100;
+}
+
+/* Device emulation submenu: fixed wider width so the Custom row doesn't
+   widen the list and misalign the other options. */
+.menu.wide {
+	min-width: 300px;
+}
+
+.menu-item {
+	display: flex;
+	align-items: center;
+	gap: 8px;
+	padding: 5px 8px;
+	border-radius: 3px;
+	cursor: pointer;
+	white-space: nowrap;
+	overflow: hidden;
+	text-overflow: ellipsis;
+}
+
+/* Device submenu: always reserve the check column so selecting an item
+   (especially Custom) does not shift the label / inputs / Apply button. */
+.menu.wide .menu-item {
+	position: relative;
+	padding-right: 22px;
+}
+
+.menu-item:hover {
+	background-color: var(--vscode-menu-selectionBackground);
+	color: var(--vscode-menu-selectionForeground);
+}
+
+.menu-item.danger {
+	color: var(--vscode-errorForeground);
+}
+
+.menu-item.checked::after {
+	content: '\2713';
+	margin-left: auto;
+	font-size: 12px;
+}
+
+.menu.wide .menu-item.checked::after {
+	position: absolute;
+	right: 8px;
+	top: 50%;
+	transform: translateY(-50%);
+	margin-left: 0;
+	width: 12px;
+	text-align: center;
+}
+
+.menu-icon {
+	display: inline-flex;
+	flex: 0 0 auto;
+	opacity: 0.9;
+}
+
+.menu-label {
+	flex: 1 1 auto;
+	overflow: hidden;
+	text-overflow: ellipsis;
+}
+
+.menu-custom {
+	display: flex;
+	align-items: center;
+	gap: 4px;
+}
+
+/* Keep the custom inputs left-aligned next to the label (label must not grow). */
+.menu-custom-item .menu-label {
+	flex: 0 0 auto;
+}
+
+.menu-custom-item .menu-custom {
+	flex: 0 0 auto;
+}
+
+.menu-custom input {
+	width: 64px;
+	height: 22px;
+	padding: 0 4px;
+	background-color: var(--vscode-input-background);
+	color: var(--vscode-input-foreground);
+	border: 1px solid var(--vscode-input-border, transparent);
+	border-radius: 3px;
+}
+
+.menu-custom-x {
+	opacity: 0.6;
+}
+
+.menu-apply {
+	background-color: var(--vscode-button-background);
+	color: var(--vscode-button-foreground);
+	border: none;
+	border-radius: 3px;
+	padding: 2px 8px;
+	cursor: pointer;
+}
+
+.menu-apply:hover {
+	background-color: var(--vscode-button-hoverBackground);
+}
+
+.menu-arrow {
+	display: inline-flex;
+	flex: 0 0 auto;
+	opacity: 0.6;
+}
+
+.menu-sep {
+	height: 1px;
+	margin: 4px 6px;
+	background-color: var(--vscode-menu-separatorBackground, var(--vscode-panel-border));
+}
+
+/* ----------------------------------------------------------------- content */
+.content {
+	flex: 1 1 auto;
+	position: relative;
+	overflow: hidden;
+}
+
+.progress {
+	position: absolute;
+	top: 0;
+	left: 0;
+	right: 0;
+	height: 2px;
+	overflow: hidden;
+	z-index: 20;
+}
+
+.progress::before {
+	content: '';
+	display: block;
+	height: 100%;
+	width: 40%;
+	background-color: var(--vscode-progressBar-background);
+	animation: progress-slide 1s ease-in-out infinite;
+}
+
+@keyframes progress-slide {
+	0% {
+		margin-left: -40%;
+	}
+	100% {
+		margin-left: 100%;
+	}
+}
+
+.viewport-wrap {
+	position: absolute;
+	inset: 0;
+	overflow: auto;
+	background-color: var(--vscode-sideBar-background, var(--vscode-panel-background));
+}
+
+.zoom-layer {
+	width: 100%;
+	height: 100%;
+	transform-origin: 0 0;
+}
+
+.viewport {
+	position: relative;
+	width: 100%;
+	height: 100%;
+	margin: 0 auto;
+}
+
+.viewport.emulated {
+	margin: auto;
+}
+
+.viewport.emulated {
+	border-left: 1px solid var(--vscode-panel-border);
+	border-right: 1px solid var(--vscode-panel-border);
+	box-shadow: 0 0 8px rgba(0, 0, 0, 0.2);
+}
+
+#browser-frame {
+	position: absolute;
+	inset: 0;
+	width: 100%;
+	height: 100%;
+	border: none;
+	background: #fff;
+}
+
+.resize-handle {
+	position: absolute;
+	top: 0;
+	bottom: 0;
+	right: -3px;
+	width: 6px;
+	cursor: ew-resize;
+	z-index: 10;
+}
+
+.resize-handle:hover {
+	background-color: var(--vscode-focusBorder);
+	opacity: 0.5;
+}
+
+/* ------------------------------------------------------------ empty state */
+.empty-state {
+	position: absolute;
+	inset: 0;
+	display: flex;
+	flex-direction: column;
+	align-items: center;
+	justify-content: center;
+	gap: 12px;
+	background-color: var(--vscode-panel-background);
+	color: var(--vscode-descriptionForeground);
+}
+
+.empty-icon {
+	opacity: 0.4;
+}
+
+.empty-message {
+	font-size: 14px;
+}
+
+.empty-btn {
+	background-color: var(--vscode-button-background);
+	color: var(--vscode-button-foreground);
+	border: none;
+	border-radius: 4px;
+	padding: 5px 14px;
+	cursor: pointer;
+}
+
+.empty-btn:hover {
+	background-color: var(--vscode-button-hoverBackground);
+}
+
+/* ------------------------------------------------------------ error state */
+.error-state {
+	position: absolute;
+	inset: 0;
+	display: flex;
+	flex-direction: column;
+	align-items: center;
+	justify-content: center;
+	gap: 12px;
+	padding: 24px;
+	text-align: center;
+	background-color: var(--vscode-panel-background);
+	color: var(--vscode-descriptionForeground);
+}
+
+.error-title {
+	font-size: 16px;
+	font-weight: 600;
+	color: var(--vscode-errorForeground);
+}
+
+.error-detail {
+	font-size: 12px;
+	word-break: break-all;
+	max-width: 90%;
+}
+
+.error-actions {
+	display: flex;
+	gap: 8px;
+	margin-top: 8px;
+}

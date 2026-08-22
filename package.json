@@ -1,0 +1,99 @@
+{
+  "name": "browser-panel",
+  "displayName": "Browser Panel",
+  "description": "Embedded browser for the VS Code bottom panel / secondary sidebar. Address bar, reload, DevTools (F12) and open-in-external-browser. Defaults to http://localhost:80 for local development preview.",
+  "version": "0.3.14",
+  "publisher": "artin",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/artin/browser-panel"
+  },
+  "engines": {
+    "vscode": "^1.70.0"
+  },
+  "categories": [
+    "Other"
+  ],
+  "activationEvents": [
+    "onCommand:browser.open",
+    "onView:browser.view"
+  ],
+  "main": "./dist/extension.js",
+  "contributes": {
+    "commands": [
+      {
+        "command": "browser.open",
+        "title": "%browser.open.title%",
+        "category": "%browser.category%"
+      }
+    ],
+    "viewsContainers": {
+      "panel": [
+        {
+          "id": "browser-container",
+          "title": "%browser.container.title%",
+          "icon": "resources/icon.svg"
+        }
+      ]
+    },
+    "views": {
+      "browser-container": [
+        {
+          "id": "browser.view",
+          "name": "%browser.view.name%",
+          "type": "webview",
+          "icon": "resources/icon.svg"
+        }
+      ]
+    },
+    "configuration": {
+      "title": "%configuration.title%",
+      "properties": {
+        "browser.defaultUrl": {
+          "type": "string",
+          "default": "http://localhost:80",
+          "description": "%browser.defaultUrl.description%"
+        },
+        "browser.retainContextWhenHidden": {
+          "type": "boolean",
+          "default": true,
+          "description": "%browser.retainContextWhenHidden.description%"
+        },
+        "browser.historyLimit": {
+          "type": "number",
+          "default": 200,
+          "minimum": 1,
+          "maximum": 10000,
+          "description": "%browser.historyLimit.description%"
+        },
+        "browser.proxyEnabled": {
+          "type": "boolean",
+          "default": false,
+          "description": "%browser.proxyEnabled.description%"
+        }
+      }
+    }
+  },
+  "scripts": {
+    "vscode:prepublish": "npm run build",
+    "build": "node esbuild.js",
+    "watch": "node esbuild.js --watch",
+    "typecheck": "tsc --noEmit",
+    "package": "vsce package",
+    "lint": "eslint src"
+  },
+  "devDependencies": {
+    "@types/node": "^24.0.0",
+    "@types/vscode": "~1.70.0",
+    "@vscode/vsce": "^3.9.2",
+    "esbuild": "^0.28.2",
+    "ovsx": "^1.1.1",
+    "typescript": "^7.0.2"
+  },
+  "allowScripts": {
+    "esbuild@0.28.2": true,
+    "@vscode/vsce-sign@2.1.0": true,
+    "keytar@7.9.0": true
+  }
+}

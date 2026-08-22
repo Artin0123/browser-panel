@@ -1,0 +1,52 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+	<meta charset="UTF-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1.0">
+	<meta http-equiv="Content-Security-Policy"
+		content="default-src 'none'; style-src ${cspSource} 'unsafe-inline'; script-src ${cspSource}; frame-src http: https:; img-src ${cspSource} http: https: data:;">
+	<title>Browser</title>
+	<link rel="stylesheet" href="${styleUri}">
+</head>
+<body>
+	<div class="toolbar">
+		<button id="btn-back" class="icon-btn" data-icon="arrow-left" title="Back" disabled></button>
+		<button id="btn-forward" class="icon-btn" data-icon="arrow-right" title="Forward" disabled></button>
+		<button id="btn-reload" class="icon-btn" data-icon="refresh" title="Reload"></button>
+		<div class="urlbar">
+			<input id="url-input" type="text" placeholder="http://localhost:80" spellcheck="false" autocomplete="off">
+			<button id="btn-go" class="urlbar-go" data-icon="arrow-right" title="Go"></button>
+		</div>
+		<button id="btn-home" class="icon-btn" data-icon="home" title="Home"></button>
+		<button id="btn-devtools" class="icon-btn" data-icon="developer-tools" title="Open DevTools"></button>
+		<div class="menu-wrap">
+			<button id="btn-menu" class="icon-btn" data-icon="ellipsis" title="More actions"></button>
+			<div id="menu" class="menu" hidden></div>
+		</div>
+	</div>
+	<div class="content" id="content">
+		<div id="progress" class="progress" hidden></div>
+		<div id="viewport-wrap" class="viewport-wrap">
+			<div id="zoom-layer" class="zoom-layer">
+				<div id="viewport" class="viewport">
+					<iframe id="browser-frame" title="Browser content"></iframe>
+					<div id="resize-handle" class="resize-handle" title="Drag to resize" hidden></div>
+				</div>
+			</div>
+		</div>
+		<div id="empty-state" class="empty-state" hidden>
+			<div id="empty-icon" class="empty-icon"></div>
+			<div id="empty-message" class="empty-message">Browser closed</div>
+			<button id="btn-reopen" class="empty-btn">Reopen</button>
+		</div>
+		<div id="error-state" class="error-state" hidden>
+			<div id="error-title" class="error-title"></div>
+			<div id="error-detail" class="error-detail"></div>
+			<div class="error-actions">
+				<button id="btn-error-external" class="empty-btn"></button>
+			</div>
+		</div>
+	</div>
+	<script src="${scriptUri}"></script>
+</body>
+</html>
