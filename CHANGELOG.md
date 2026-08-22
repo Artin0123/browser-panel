@@ -1,5 +1,11 @@
 # Changelog
 
+## [0.3.16] - 2026-08-22
+
+### Fixed
+
+- Fixed the repository URL in the package.json
+
 ## [0.3.15] - 2026-08-22
 
 ### Added
