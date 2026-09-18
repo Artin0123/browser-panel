@@ -402,6 +402,14 @@ body {
 	color: var(--vscode-descriptionForeground);
 }
 
+.error-main {
+	display: flex;
+	flex-direction: column;
+	align-items: center;
+	gap: 12px;
+	max-width: 100%;
+}
+
 .error-title {
 	font-size: 16px;
 	font-weight: 600;
@@ -416,6 +424,23 @@ body {
 
 .error-actions {
 	display: flex;
+	flex-wrap: wrap;
+	justify-content: center;
 	gap: 8px;
 	margin-top: 8px;
+}
+
+/* Sit under the error/browser area: cancel button, then countdown text below it. */
+.error-reconnect-block {
+	margin-top: auto;
+	display: flex;
+	flex-direction: column;
+	align-items: center;
+	gap: 8px;
+	padding-top: 16px;
+}
+
+.error-reconnect {
+	font-size: 12px;
+	color: var(--vscode-descriptionForeground);
 }

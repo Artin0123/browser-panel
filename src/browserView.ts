@@ -17,9 +17,11 @@ interface WebviewMessage {
 		| 'historyQuickPick'
 		| 'clearStorage'
 		| 'checkUrl'
-		| 'setClosed';
+		| 'setClosed'
+		| 'copyText';
 	url?: string;
 	closed?: boolean;
+	text?: string;
 }
 
 interface UrlStatus {
@@ -240,6 +242,11 @@ export class BrowserViewProvider implements vscode.WebviewViewProvider {
 			case 'openExternal':
 				if (msg.url) {
 					void vscode.env.openExternal(vscode.Uri.parse(msg.url));
+				}
+				break;
+			case 'copyText':
+				if (typeof msg.text === 'string') {
+					await vscode.env.clipboard.writeText(msg.text);
 				}
 				break;
 			case 'openSettings':

@@ -1,5 +1,6 @@
 import * as http from 'http';
 import * as https from 'https';
+import * as zlib from 'zlib';
 
 /**
  * Local HTTP proxy that lets frame-blocked sites render inside the webview iframe.
@@ -12,11 +13,37 @@ import * as https from 'https';
  * - Forwards request headers (not a tiny allow-list). SPAs (Next.js RSC, Vite,
  *   etc.) send custom headers; dropping them makes the client treat the response
  *   as a full document and reload-loop. See docs/PROXY.md.
- * - Pure streaming: no body editing (no <base> injection — it made path-aware
- *   apps canonical-redirect in a loop). Relative links work via token routing at
- *   /p/<token>/... paths; root-relative URLs route through the last target.
+ * - No <base> / path rewriting (those caused SPA redirect loops). For text/html
+ *   only, may buffer and inject a tiny external shim script tag so window.open /
+ *   target=_blank and clipboard fallback can reach the parent webview.
  * - Set-Cookie is intentionally dropped (logins don't persist via the proxy).
  */
+
+/** Max HTML body size to buffer for shim injection (bytes). */
+const HTML_INJECT_MAX_BYTES = 5 * 1024 * 1024;
+
+/**
+ * Served at /p/<token>/__bp_shim.js and referenced from injected script tags.
+ * Bridges window.open / target=_blank and clipboard failures to the parent webview.
+ */
+const SHIM_JS =
+	'(function(){' +
+	'function abs(u){try{return new URL(u,location.href).href}catch(e){return null}}' +
+	'function send(t,p){try{parent.postMessage(Object.assign({type:t},p),"*")}catch(e){}}' +
+	'function openExt(u){var a=abs(u);if(a)send("openExternal",{url:a})}' +
+	'window.open=function(u){if(u)openExt(u);return null};' +
+	'document.addEventListener("click",function(e){' +
+	'var t=e.target;while(t&&t.tagName!=="A")t=t.parentElement;if(!t)return;' +
+	'var g=(t.getAttribute("target")||"").toLowerCase();' +
+	'if(g==="_blank"||g==="_new"){e.preventDefault();e.stopPropagation();openExt(t.href)}' +
+	'},true);' +
+	'try{if(navigator.clipboard&&navigator.clipboard.writeText){' +
+	'var w=navigator.clipboard.writeText.bind(navigator.clipboard);' +
+	'navigator.clipboard.writeText=function(text){' +
+	'return w(text).catch(function(){send("copy",{text:String(text)});return Promise.resolve()})' +
+	'}}' +
+	'}catch(e){}' +
+	'})();';
 
 const DROP_REQUEST_HEADERS = new Set([
 	'connection',
@@ -53,6 +80,10 @@ export class FrameProxy {
 
 	get listening(): boolean {
 		return !!this._server;
+	}
+
+	private get _shimPath(): string {
+		return '/p/' + this._token + '/__bp_shim.js';
 	}
 
 	async start(): Promise<void> {
@@ -294,8 +325,125 @@ export class FrameProxy {
 		return outHeaders;
 	}
 
+	private _isHtmlResponse(headers: http.IncomingHttpHeaders): boolean {
+		return /text\/html/i.test(String(headers['content-type'] || ''));
+	}
+
+	private _decompressBody(buf: Buffer, encoding: string): Buffer {
+		const enc = encoding.toLowerCase();
+		if (enc === 'gzip') {
+			return Buffer.from(zlib.gunzipSync(buf));
+		}
+		if (enc === 'deflate') {
+			return Buffer.from(zlib.inflateSync(buf));
+		}
+		if (enc === 'br') {
+			return Buffer.from(zlib.brotliDecompressSync(buf));
+		}
+		return buf;
+	}
+
+	/** Insert external shim script before </body> (or append). */
+	private _injectShimTag(html: Buffer): Buffer {
+		const tag = '<script src="' + this._shimPath + '"></script>';
+		const s = html.toString('utf8');
+		const lower = s.toLowerCase();
+		const idx = lower.lastIndexOf('</body>');
+		if (idx !== -1) {
+			return Buffer.from(s.slice(0, idx) + tag + s.slice(idx), 'utf8');
+		}
+		return Buffer.from(s + tag, 'utf8');
+	}
+
+	private _pipeOrInjectHtml(
+		pres: http.IncomingMessage,
+		res: http.ServerResponse,
+		target: ProxyTarget
+	): void {
+		const outHeaders = this._copyResponseHeaders(pres, target);
+		const declaredLen = parseInt(String(pres.headers['content-length'] || ''), 10);
+		// Known-large or non-HTML: stream unchanged (no shim).
+		if (!this._isHtmlResponse(pres.headers) || (Number.isFinite(declaredLen) && declaredLen > HTML_INJECT_MAX_BYTES)) {
+			res.writeHead(pres.statusCode ?? 502, outHeaders);
+			pres.pipe(res);
+			return;
+		}
+
+		const encoding = String(pres.headers['content-encoding'] || '');
+		const chunks: Buffer[] = [];
+		let size = 0;
+		let passthrough = false;
+
+		const startPassthrough = (firstOverflowChunk: Buffer) => {
+			passthrough = true;
+			res.writeHead(pres.statusCode ?? 502, outHeaders);
+			for (const c of chunks) {
+				res.write(c);
+			}
+			chunks.length = 0;
+			res.write(firstOverflowChunk);
+		};
+
+		pres.on('data', (chunk: Buffer) => {
+			if (passthrough) {
+				res.write(chunk);
+				return;
+			}
+			size += chunk.length;
+			if (size > HTML_INJECT_MAX_BYTES) {
+				// Over limit mid-stream: flush buffered bytes + rest without injection.
+				startPassthrough(chunk);
+				return;
+			}
+			chunks.push(chunk);
+		});
+		pres.on('error', () => {
+			if (!res.headersSent) {
+				res.writeHead(502, { 'content-type': 'text/plain' });
+				res.end('Proxy error: ' + target.url.href);
+			} else {
+				res.destroy();
+			}
+		});
+		pres.on('end', () => {
+			if (passthrough) {
+				res.end();
+				return;
+			}
+			const raw = Buffer.concat(chunks);
+			try {
+				let buf: Buffer = Buffer.from(raw);
+				if (encoding) {
+					buf = this._decompressBody(buf, encoding);
+				}
+				buf = Buffer.from(this._injectShimTag(buf));
+				delete outHeaders['content-encoding'];
+				delete outHeaders['content-length'];
+				outHeaders['content-length'] = buf.length;
+				res.writeHead(pres.statusCode ?? 502, outHeaders);
+				res.end(buf);
+			} catch {
+				delete outHeaders['content-length'];
+				outHeaders['content-length'] = raw.length;
+				res.writeHead(pres.statusCode ?? 502, outHeaders);
+				res.end(raw);
+			}
+		});
+	}
+
 	private _handle(req: http.IncomingMessage, res: http.ServerResponse): void {
-		const target = this._resolveTarget(req.url || '');
+		const reqUrl = req.url || '';
+		// Same-origin shim for proxied pages (CSP script-src 'self' friendly).
+		if (reqUrl.split('?')[0] === this._shimPath) {
+			res.writeHead(200, {
+				'content-type': 'application/javascript; charset=utf-8',
+				'cache-control': 'no-store',
+			});
+			res.end(SHIM_JS);
+			return;
+		}
+
+		const target = this._resolveTarget(reqUrl);
 		if (!target) {
 			res.writeHead(404);
 			res.end('Not Found');
@@ -313,8 +461,7 @@ export class FrameProxy {
 				rejectUnauthorized: false,
 			},
 			(pres) => {
-				res.writeHead(pres.statusCode ?? 502, this._copyResponseHeaders(pres, target));
-				pres.pipe(res);
+				this._pipeOrInjectHtml(pres, res, target);
 			}
 		);
 		preq.on('error', () => {

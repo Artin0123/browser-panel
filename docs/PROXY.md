@@ -1,8 +1,24 @@
-# 本地 frame proxy
+# [已完成] 本地 frame proxy
+
+> **狀態標記**：[已完成]
+> **時間**：2026-08-22（2026-09-18 覆核完成）
+> **說明**：本文檔記錄之 Next.js 頁面閃爍循環問題與 Header 轉發機制已於 2026-08-22（v0.3.14）在 `src/proxy.ts` 完成修復並驗證。
+
+---
 
 `browser.proxyEnabled` 打开后，webview iframe 不直连目标站，而是走 extension host 里绑在 `127.0.0.1` 的 HTTP 代理（`src/proxy.ts`）。目的只有一件事：剥掉 `X-Frame-Options` / CSP `frame-ancestors`，让「只禁止内嵌」的页面能显示。
 
 这不是 Next.js 专用通道。任意 `http`/`https` localhost（或外网）都走同一条路径。静态页、普通多页站点本来就不会闪；会出问题的是**会读 `window.location.pathname` 或自订请求头**的 SPA / 开发服务器。
+
+## HTML shim（另开分页 / 剪贴簿 fallback）
+
+对 `text/html` 回应会在 `</body>` 前插入：
+
+```html
+<script src="/p/<token>/__bp_shim.js"></script>
+```
+
+脚本与页面同属代理 origin，将 `window.open`、`a[target=_blank|_new]` 以及 Clipboard API 失败时的写入，经 `parent.postMessage` 交给 webview：另开走 `openExternal`，复制走 `copyText` → `vscode.env.clipboard.writeText`（不依赖 webview 自己的 Clipboard Permissions-Policy）。不注入 `<base>`、不改写路径。超过约 5MB 的 HTML（含无 `Content-Length`、边收边超限）**跳过注入并原样串流**，不再回 502。
 
 ## URL 形态
 

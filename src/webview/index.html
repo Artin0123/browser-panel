@@ -29,7 +29,8 @@
 		<div id="viewport-wrap" class="viewport-wrap">
 			<div id="zoom-layer" class="zoom-layer">
 				<div id="viewport" class="viewport">
-					<iframe id="browser-frame" title="Browser content"></iframe>
+					<iframe id="browser-frame" title="Browser content"
+						allow="clipboard-read; clipboard-write; camera; microphone; geolocation; fullscreen"></iframe>
 					<div id="resize-handle" class="resize-handle" title="Drag to resize" hidden></div>
 				</div>
 			</div>
@@ -40,10 +41,16 @@
 			<button id="btn-reopen" class="empty-btn">Reopen</button>
 		</div>
 		<div id="error-state" class="error-state" hidden>
-			<div id="error-title" class="error-title"></div>
-			<div id="error-detail" class="error-detail"></div>
-			<div class="error-actions">
-				<button id="btn-error-external" class="empty-btn"></button>
+			<div class="error-main">
+				<div id="error-title" class="error-title"></div>
+				<div id="error-detail" class="error-detail"></div>
+				<div class="error-actions">
+					<button id="btn-error-external" class="empty-btn"></button>
+				</div>
+			</div>
+			<div id="error-reconnect-block" class="error-reconnect-block" hidden>
+				<button id="btn-error-cancel-reconnect" class="empty-btn"></button>
+				<div id="error-reconnect" class="error-reconnect"></div>
 			</div>
 		</div>
 	</div>

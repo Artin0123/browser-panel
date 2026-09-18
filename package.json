@@ -11,7 +11,7 @@
     "url": "https://github.com/Artin0123/browser-panel"
   },
   "engines": {
-    "vscode": "^1.70.0"
+    "vscode": "^1.96.0"
   },
   "categories": [
     "Other"
@@ -85,11 +85,11 @@
     "lint": "eslint src"
   },
   "devDependencies": {
-    "@types/node": "^24.0.0",
-    "@types/vscode": "~1.70.0",
-    "@vscode/vsce": "^3.9.2",
+    "@types/node": "^26.6.1",
+    "@types/vscode": "~1.96.0",
+    "@vscode/vsce": "^4.0.0",
     "esbuild": "^0.28.2",
-    "ovsx": "^1.1.1",
+    "ovsx": "^1.2.0",
     "typescript": "^7.0.2"
   },
   "allowScripts": {

@@ -28,8 +28,13 @@ import { svgIcon } from './icons.js';
 	const errorState = document.getElementById('error-state');
 	const errorTitleEl = document.getElementById('error-title');
 	const errorDetailEl = document.getElementById('error-detail');
+	const errorReconnectBlock = document.getElementById('error-reconnect-block');
+	const errorReconnectEl = document.getElementById('error-reconnect');
+	const btnErrorCancelReconnect = document.getElementById('btn-error-cancel-reconnect');
 	const btnErrorExternal = document.getElementById('btn-error-external');
 	const zoomLayer = document.getElementById('zoom-layer');
+
+	const RECONNECT_INTERVAL_SEC = 10;
 
 	/** @type {{ defaultUrl: string, retainContextWhenHidden: boolean, historyLimit: number }} */
 	let config = { defaultUrl: 'http://localhost:80', retainContextWhenHidden: true, historyLimit: 200 };
@@ -50,6 +55,8 @@ import { svgIcon } from './icons.js';
 			emptyTitle: 'Browser closed', emptyReopen: 'Reopen',
 			errorTitle: 'Cannot connect',
 			embedTitle: 'Site cannot be embedded', embedDetail: 'The site blocks embedding (X-Frame-Options / CSP frame-ancestors). Use "Open in external browser" or enable the browser.proxyEnabled setting.',
+			reconnectIn: 'Retrying in {n}s\u2026',
+			cancelReconnect: 'Cancel auto-retry',
 			devices: { 'iphone-se': 'iPhone SE (375\u00d7667)', 'iphone-14': 'iPhone 14 (390\u00d7844)', 'iphone-plus': 'iPhone Plus (414\u00d7896)', pixel: 'Pixel 7 (412\u00d7915)', ipad: 'iPad (768\u00d71024)', 'ipad-air': 'iPad Air (820\u00d71180)', 'surface-duo': 'Surface Duo (912\u00d71368)' },
 		},
 		'zh-cn': {
@@ -64,6 +71,8 @@ import { svgIcon } from './icons.js';
 			emptyTitle: '浏览器已关闭', emptyReopen: '重新打开',
 			errorTitle: '无法连接',
 			embedTitle: '网站无法内嵌', embedDetail: '该网站禁止内嵌（X-Frame-Options / CSP frame-ancestors）。请使用「在外部浏览器中打开」，或开启 browser.proxyEnabled 设置。',
+			reconnectIn: '{n} 秒后自动重试\u2026',
+			cancelReconnect: '取消自动重试',
 			devices: { 'iphone-se': 'iPhone SE (375\u00d7667)', 'iphone-14': 'iPhone 14 (390\u00d7844)', 'iphone-plus': 'iPhone Plus (414\u00d7896)', pixel: 'Pixel 7 (412\u00d7915)', ipad: 'iPad (768\u00d71024)', 'ipad-air': 'iPad Air (820\u00d71180)', 'surface-duo': 'Surface Duo (912\u00d71368)' },
 		},
 		'zh-tw': {
@@ -78,6 +87,8 @@ import { svgIcon } from './icons.js';
 			emptyTitle: '瀏覽器已關閉', emptyReopen: '重新開啟',
 			errorTitle: '無法連線',
 			embedTitle: '網站無法內嵌', embedDetail: '該網站禁止內嵌（X-Frame-Options / CSP frame-ancestors）。請使用「在外部瀏覽器開啟」，或開啟 browser.proxyEnabled 設定。',
+			reconnectIn: '{n} 秒後自動重試\u2026',
+			cancelReconnect: '取消自動重試',
 			devices: { 'iphone-se': 'iPhone SE (375\u00d7667)', 'iphone-14': 'iPhone 14 (390\u00d7844)', 'iphone-plus': 'iPhone Plus (414\u00d7896)', pixel: 'Pixel 7 (412\u00d7915)', ipad: 'iPad (768\u00d71024)', 'ipad-air': 'iPad Air (820\u00d71180)', 'surface-duo': 'Surface Duo (912\u00d71368)' },
 		},
 	};
@@ -209,6 +220,14 @@ import { svgIcon } from './icons.js';
 	let connectingTimer = null;
 	let loadTimer = null;
 	let errorUrl = '';
+	let reconnectUrl = '';
+	let reconnectSecondsLeft = 0;
+	let reconnectCountdownTimer = null;
+	let reconnectArmed = false; // auto-retry scheduled (not cancelled)
+
+	function stopLoading() {
+		btnReload.classList.remove('loading');
+	}
 
 	function showConnecting() {
 		clearTimeout(connectingTimer);
@@ -223,18 +242,75 @@ import { svgIcon } from './icons.js';
 		progressEl.hidden = true;
 	}
 
+	function clearReconnect() {
+		clearInterval(reconnectCountdownTimer);
+		reconnectCountdownTimer = null;
+		reconnectUrl = '';
+		reconnectSecondsLeft = 0;
+		reconnectArmed = false;
+		errorReconnectBlock.hidden = true;
+	}
+
+	function updateReconnectLabel() {
+		errorReconnectEl.textContent = S.reconnectIn.replace('{n}', String(reconnectSecondsLeft));
+	}
+
+	function startReconnect(url) {
+		clearReconnect();
+		reconnectUrl = url;
+		reconnectArmed = true;
+		errorReconnectBlock.hidden = false;
+		btnErrorCancelReconnect.textContent = S.cancelReconnect;
+		reconnectSecondsLeft = RECONNECT_INTERVAL_SEC;
+		updateReconnectLabel();
+		reconnectCountdownTimer = setInterval(() => {
+			if (!reconnectArmed) {
+				return;
+			}
+			reconnectSecondsLeft -= 1;
+			if (reconnectSecondsLeft <= 0) {
+				clearInterval(reconnectCountdownTimer);
+				reconnectCountdownTimer = null;
+				runReconnect();
+				return;
+			}
+			updateReconnectLabel();
+		}, 1000);
+	}
+
+	function runReconnect() {
+		const u = reconnectUrl;
+		if (!u || closed) {
+			clearReconnect();
+			return;
+		}
+		clearReconnect();
+		navigate(u, { record: false });
+	}
+
+	function cancelReconnect() {
+		clearReconnect();
+	}
+
 	function showError(url, detail, blocked) {
 		stopConnecting();
+		stopLoading();
 		clearTimeout(loadTimer);
+		clearReconnect();
 		frame.removeAttribute('src'); // cancel the hanging iframe load
 		errorUrl = url;
 		errorTitleEl.textContent = blocked ? S.embedTitle : S.errorTitle;
 		errorDetailEl.textContent = url + ' \u2014 ' + (blocked ? S.embedDetail : detail);
 		errorState.hidden = false;
 		viewportWrap.hidden = true;
+		// Auto-reconnect only for reachability failures (not frame-blocked sites).
+		if (!blocked) {
+			startReconnect(url);
+		}
 	}
 
 	function hideError() {
+		clearReconnect();
 		errorState.hidden = true;
 		errorUrl = '';
 		if (!closed) {
@@ -261,6 +337,7 @@ import { svgIcon } from './icons.js';
 		loadTimer = setTimeout(() => {
 			if (pendingCheck && pendingCheck.url === u && !closed) {
 				stopConnecting();
+				stopLoading();
 			}
 		}, 20000);
 	}
@@ -277,6 +354,7 @@ import { svgIcon } from './icons.js';
 		programmaticNav = false;
 		startNavigation(u);
 		if (record) {
+			lastUrl = u;
 			vscode.postMessage({ type: 'navigate', url: u });
 		}
 	}
@@ -291,6 +369,7 @@ import { svgIcon } from './icons.js';
 		}
 		programmaticNav = true;
 		startNavigation(prev);
+		lastUrl = prev;
 		vscode.postMessage({ type: 'navigate', url: prev });
 	}
 
@@ -304,22 +383,33 @@ import { svgIcon } from './icons.js';
 		}
 		programmaticNav = true;
 		startNavigation(next);
+		lastUrl = next;
 		vscode.postMessage({ type: 'navigate', url: next });
 	}
 
 	function reload() {
 		ensureOpen();
-		const u = nav.current || fromProxyUrl(currentUrl());
+		const u = nav.current || fromProxyUrl(currentUrl()) || errorUrl || lastUrl;
 		if (!u) {
 			return;
 		}
+		hideError();
 		// contentWindow.location is blocked cross-origin; re-setting src works everywhere.
 		frame.setAttribute('src', toProxyUrl(u));
+		nav.current = u;
+		urlInput.value = u;
 		btnReload.classList.add('loading');
 		showConnecting();
 		const id = ++checkSeq;
 		pendingCheck = { id, url: u };
 		vscode.postMessage({ type: 'checkUrl', url: u });
+		clearTimeout(loadTimer);
+		loadTimer = setTimeout(() => {
+			if (pendingCheck && pendingCheck.url === u && !closed) {
+				stopConnecting();
+				stopLoading();
+			}
+		}, 20000);
 	}
 
 	// Track in-iframe navigations (link clicks / redirects) so back/forward work.
@@ -419,13 +509,22 @@ import { svgIcon } from './icons.js';
 	// Close / reopen (unloads the page -> frees memory; keeps toolbar + history)
 	// ---------------------------------------------------------------------------
 	function closeBrowser() {
+		if (nav.current) {
+			lastUrl = nav.current;
+		} else if (urlInput.value.trim()) {
+			const kept = normalizeUrl(urlInput.value);
+			if (kept) {
+				lastUrl = kept;
+			}
+		}
 		nav.back = [];
 		nav.forward = [];
 		nav.current = '';
 		stopConnecting();
+		stopLoading();
 		hideError();
 		frame.removeAttribute('src'); // unloads the page, frees its memory
-		urlInput.value = ''; // clear the address bar while closed
+		urlInput.value = lastUrl || config.defaultUrl; // keep last URL visible while closed
 		closed = true;
 		viewportWrap.hidden = true;
 		emptyState.hidden = false;
@@ -656,6 +755,7 @@ import { svgIcon } from './icons.js';
 	btnHome.addEventListener('click', () => navigate(config.defaultUrl));
 	btnDevtools.addEventListener('click', () => vscode.postMessage({ type: 'openDevtools' }));
 	btnReopen.addEventListener('click', reopenBrowser);
+	btnErrorCancelReconnect.addEventListener('click', cancelReconnect);
 	btnErrorExternal.addEventListener('click', () => {
 		if (errorUrl) {
 			vscode.postMessage({ type: 'openExternal', url: errorUrl });
@@ -663,11 +763,21 @@ import { svgIcon } from './icons.js';
 	});
 
 	// ---------------------------------------------------------------------------
-	// Host messages
+	// Host messages (+ iframe bridge for proxy shim: openExternal / copy)
 	// ---------------------------------------------------------------------------
 	window.addEventListener('message', (event) => {
 		const msg = event.data;
 		if (!msg || typeof msg.type !== 'string') {
+			return;
+		}
+		// Messages from the proxied page (shim) — same channel as host posts.
+		if (msg.type === 'openExternal' && typeof msg.url === 'string' && msg.url) {
+			vscode.postMessage({ type: 'openExternal', url: msg.url });
+			return;
+		}
+		if (msg.type === 'copy' && typeof msg.text === 'string') {
+			// Prefer extension-host clipboard (webview Permissions-Policy often still blocks).
+			vscode.postMessage({ type: 'copyText', text: msg.text });
 			return;
 		}
 		if (msg.type === 'config') {
@@ -678,11 +788,11 @@ import { svgIcon } from './icons.js';
 			urlInput.placeholder = config.defaultUrl;
 			lastUrl = msg.lastUrl || '';
 			if (msg.closed === true) {
-				// The browser was explicitly closed last time: stay closed (no auto navigation).
+				// Explicitly closed last time: stay closed (no auto navigation).
 				closed = true;
 				viewportWrap.hidden = true;
 				emptyState.hidden = false;
-				urlInput.value = '';
+				urlInput.value = lastUrl || config.defaultUrl;
 				updateButtons();
 			} else {
 				navigate(lastUrl || config.defaultUrl);
@@ -714,8 +824,11 @@ import { svgIcon } from './icons.js';
 			}
 		} else if (msg.type === 'storageCleared') {
 			// Host cleared history + lastUrl; reload the page to drop in-memory state.
+			lastUrl = '';
 			if (!closed) {
 				reload();
+			} else {
+				urlInput.value = config.defaultUrl;
 			}
 		}
 	});
@@ -733,6 +846,10 @@ import { svgIcon } from './icons.js';
 		btnReopen.textContent = S.emptyReopen;
 		errorTitleEl.textContent = S.errorTitle;
 		btnErrorExternal.textContent = S.menuExternal;
+		btnErrorCancelReconnect.textContent = S.cancelReconnect;
+		if (reconnectArmed && reconnectSecondsLeft > 0) {
+			updateReconnectLabel();
+		}
 	}
 
 	// ---------------------------------------------------------------------------
