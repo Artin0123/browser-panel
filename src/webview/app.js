@@ -248,7 +248,8 @@ import { svgIcon } from './icons.js';
 		reconnectUrl = '';
 		reconnectSecondsLeft = 0;
 		reconnectArmed = false;
-		errorReconnectBlock.hidden = true;
+		errorReconnectBlock.classList.add('is-idle');
+		errorReconnectEl.textContent = '\u00a0';
 	}
 
 	function updateReconnectLabel() {
@@ -259,7 +260,7 @@ import { svgIcon } from './icons.js';
 		clearReconnect();
 		reconnectUrl = url;
 		reconnectArmed = true;
-		errorReconnectBlock.hidden = false;
+		errorReconnectBlock.classList.remove('is-idle');
 		btnErrorCancelReconnect.textContent = S.cancelReconnect;
 		reconnectSecondsLeft = RECONNECT_INTERVAL_SEC;
 		updateReconnectLabel();

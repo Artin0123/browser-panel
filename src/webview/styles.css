@@ -430,17 +430,22 @@ body {
 	margin-top: 8px;
 }
 
-/* Sit under the error/browser area: cancel button, then countdown text below it. */
+/* Always reserve height (even when idle) so the external button does not jump. */
 .error-reconnect-block {
-	margin-top: auto;
 	display: flex;
 	flex-direction: column;
 	align-items: center;
 	gap: 8px;
-	padding-top: 16px;
+}
+
+.error-reconnect-block.is-idle {
+	visibility: hidden;
+	pointer-events: none;
 }
 
 .error-reconnect {
 	font-size: 12px;
+	line-height: 1.4;
+	min-height: 1.4em;
 	color: var(--vscode-descriptionForeground);
 }

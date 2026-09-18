@@ -1,5 +1,24 @@
 # Changelog
 
+## [0.3.17] - 2026-09-18
+
+### Added
+
+- **Auto-reconnect** on connection failure: 10s countdown with Cancel auto-retry; toolbar Reload still works for a manual retry. Embed-blocked sites are not auto-retried
+- With `browser.proxyEnabled`: in-page **Open in new tab** (`window.open` / `target=_blank`) opens the system browser (same path as the menu action); Clipboard `writeText` blocked by Permissions Policy is relayed via `vscode.env.clipboard`
+
+### Fixed
+
+- Reload spinner could spin forever after a failed probe / timeout (`.loading` was only cleared on iframe `load`)
+- Closed browser cleared the address bar; it now keeps the last URL visible, and Reopen navigates to it
+- Oversized proxied HTML no longer returns 502 — skips shim injection and streams the page through
+
+### Changed
+
+- Minimum VS Code engine raised to **^1.96.0** (types pinned to `~1.96.0`)
+- Dev tooling: `@vscode/vsce` 4, `ovsx` 1.2, `@types/node` 26
+- README / `docs/PROXY.md` / `docs/ISSUES.md` document proxy shim behavior and remaining iframe limits
+
 ## [0.3.16] - 2026-08-22
 
 ### Fixed

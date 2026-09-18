@@ -11,7 +11,7 @@ Embedded browser for the VS Code **bottom panel / secondary sidebar** — defaul
 - Back / Forward / **Reload** toolbar icons (official VS Code codicon shapes)
 - **Home** — returns to the configured default URL
 - **DevTools** — opens DevTools for the current page
-- **Connection-error page** — unreachable hosts (e.g. no server on the port) show a localized error page with Retry / Open in external browser / Home, plus a progress bar while loading
+- **Connection-error page** — unreachable hosts show a localized error with Open in external browser, plus **auto-reconnect** (10s countdown / Cancel). A progress bar shows while loading
 - **「...」menu**:
   - Settings
   - Open in external browser
