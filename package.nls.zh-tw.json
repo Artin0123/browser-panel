@@ -7,5 +7,6 @@
 	"browser.defaultUrl.description": "瀏覽器預設開啟的網址（首頁目標）。修改連接埠請編輯此網址。",
 	"browser.retainContextWhenHidden.description": "檢視隱藏時保留頁面狀態（捲動位置、表單、JS 狀態、WebSocket）。重新載入後生效。",
 	"browser.historyLimit.description": "歷史紀錄最多保留的筆數（超出刪除最舊）。",
-	"browser.proxyEnabled.description": "透過本地代理載入頁面，移除 frame 封鎖標頭（X-Frame-Options / CSP frame-ancestors）。可解決「僅禁止內嵌」的站台；需要真實瀏覽器工作階段的站台（登入、重度 JS——如 PayPal、Microsoft 登入頁）仍會白畫面——此類站台請用「在外部瀏覽器開啟」。"
+	"browser.proxyEnabled.description": "透過本地代理載入頁面，移除 frame 封鎖標頭（X-Frame-Options / CSP frame-ancestors）。可解決「僅禁止內嵌」的站台；需要真實瀏覽器工作階段的站台（登入、重度 JS——如 PayPal、Microsoft 登入頁）仍會白畫面——此類站台請用「在外部瀏覽器開啟」。",
+	"browser.acceptSelfSignedCerts.description": "載入頁面與可達性探測時接受自簽憑證。本地 https 開發伺服器請保持開啟；關閉後所有請求都強制驗證憑證（自簽主機會顯示為無法連線）。"
 }

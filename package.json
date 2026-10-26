@@ -72,6 +72,11 @@
           "type": "boolean",
           "default": false,
           "description": "%browser.proxyEnabled.description%"
+        },
+        "browser.acceptSelfSignedCerts": {
+          "type": "boolean",
+          "default": true,
+          "description": "%browser.acceptSelfSignedCerts.description%"
         }
       }
     }

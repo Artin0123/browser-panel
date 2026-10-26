@@ -38,6 +38,7 @@ Embedded browser for the VS Code **bottom panel / secondary sidebar** — defaul
 > **Close vs. hidden**: a webview view is *hidden* when it is not visible in the layout — e.g. switching the panel tab from **Browser** to **Terminal**, collapsing the panel, or switching the activity bar away (minimizing the OS window does *not* count). `retainContextWhenHidden` decides what happens then. The **Close browser** action is separate: it unloads the page (frees memory) and remembers the last URL, but scroll position cannot survive an unload (cross-origin iframe — VS Code cannot read it).
 | `browser.historyLimit` | `200` | Maximum history entries to keep (oldest removed first). |
 | `browser.proxyEnabled` | `false` | Route pages through a local proxy that strips frame-blocking headers (`X-Frame-Options` / CSP `frame-ancestors`). Same proxy for any localhost/http(s) site — not Next.js-specific. Best-effort: logins and JS-hardcoded https URLs may not work. Path-aware SPAs may do one extra navigation to `/` on first load. |
+| `browser.acceptSelfSignedCerts` | `true` | Accept self-signed certificates when loading pages (proxy mode) and during the reachability probe. Keep on for local https dev servers; turn off to enforce certificate validation everywhere (self-signed hosts then show as unreachable). |
 
 ## Known limitations
 
@@ -47,7 +48,7 @@ Embedded browser for the VS Code **bottom panel / secondary sidebar** — defaul
 - Service Workers do not run inside webviews.
 - **Find in page is not available**: the embedded page is a cross-origin iframe, which VS Code's webview find widget cannot search (the official integrated browser needs Electron's `findInPage`, which extensions cannot use). Use the external browser for full-text search.
 - **Clear storage** only clears this extension's own data (history / last URL); it cannot clear the embedded site's cookies or localStorage (no webview storage API).
-- **Protocols**: `http` and `https` are supported. The reachability probe accepts self-signed certificates, so local https dev servers work; `file://` URLs are not supported (webview CSP + no local-file access) — use Live Preview or the external browser for local files.
+- **Protocols**: `http` and `https` are supported (anything else is rejected). The reachability probe accepts self-signed certificates by default (see `browser.acceptSelfSignedCerts`), so local https dev servers work; `file://` URLs are not supported (webview CSP + no local-file access) — use Live Preview or the external browser for local files.
 - **Redirects & logins**: iframes follow redirects, but the address bar keeps the URL you typed (the final URL of a cross-origin iframe is unreadable). Logins **work and persist** — cookies live in VS Code's persistent Electron session, surviving hide/show, Close/Reopen and editor restarts (cleared only by "Developer: Clear Webview Storage" or the site's own cookie expiry). Exceptions: OAuth popups / full auth return flows are incomplete even with proxy (shim can open the system browser, but the session usually does not return to the panel). Service-Worker-based sessions don't work in webviews.
 - Other APIs often unavailable or flaky in panel iframes (not specially fixed): downloads, notifications, WebUSB/payment APIs, `alert`/`confirm`/`prompt`, camera/mic depending on site policy.
 

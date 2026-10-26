@@ -5,6 +5,7 @@ export interface BrowserConfig {
 	retainContextWhenHidden: boolean;
 	historyLimit: number;
 	proxyEnabled: boolean;
+	acceptSelfSignedCerts: boolean;
 }
 
 export function getConfig(): BrowserConfig {
@@ -14,5 +15,6 @@ export function getConfig(): BrowserConfig {
 		retainContextWhenHidden: cfg.get<boolean>('retainContextWhenHidden', true),
 		historyLimit: cfg.get<number>('historyLimit', 200),
 		proxyEnabled: cfg.get<boolean>('proxyEnabled', false),
+		acceptSelfSignedCerts: cfg.get<boolean>('acceptSelfSignedCerts', true),
 	};
 }

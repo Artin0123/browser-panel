@@ -301,12 +301,13 @@ export class BrowserViewProvider implements vscode.WebviewViewProvider {
 			}
 			const lib = u.protocol === 'https:' ? https : http;
 			let timer: NodeJS.Timeout | undefined;
-			// Intentional TLS bypass: the probe only checks reachability; self-signed
-			// certs (typical for local https dev) must not be misreported as
-			// unreachable. No credentials are sent (cookies don't exist here).
+			// Controlled by browser.acceptSelfSignedCerts (default on): the probe only
+			// checks reachability; self-signed certs (typical for local https dev) must
+			// not be misreported as unreachable. No credentials are sent (cookies
+			// don't exist here).
 			const req = lib.get(
 				u,
-				{ headers: { 'user-agent': 'browser-panel' }, rejectUnauthorized: false }, // lgtm [js/disabling-certificate-validation]
+				{ headers: { 'user-agent': 'browser-panel' }, rejectUnauthorized: !getConfig().acceptSelfSignedCerts },
 				(res) => {
 					if (timer) {
 						clearTimeout(timer);

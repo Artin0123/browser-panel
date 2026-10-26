@@ -5,7 +5,8 @@ import { FrameProxy } from './proxy';
 
 export function activate(context: vscode.ExtensionContext): void {
 	// Local proxy that strips frame-blocking headers (lazy: only runs while enabled).
-	const proxy = new FrameProxy();
+	// Cert acceptance is read per request so the setting applies without a restart.
+	const proxy = new FrameProxy(() => getConfig().acceptSelfSignedCerts);
 	context.subscriptions.push({ dispose: () => void proxy.dispose() });
 
 	// Register the browser webview view (bottom panel container, draggable to secondary sidebar).

@@ -74,6 +74,12 @@ export class FrameProxy {
 	private readonly _token = Math.random().toString(36).slice(2) + Date.now().toString(36);
 	private _lastTarget: ProxyTarget | null = null;
 
+	/**
+	 * Whether to accept self-signed certificates (browser.acceptSelfSignedCerts).
+	 * Read per request so setting changes apply without restarting the proxy.
+	 */
+	constructor(private readonly _acceptSelfSigned: () => boolean) {}
+
 	get baseUrl(): string {
 		return `http://127.0.0.1:${this._port}/p/${this._token}/`;
 	}
@@ -257,17 +263,18 @@ export class FrameProxy {
 			return;
 		}
 		const lib = target.url.protocol === 'https:' ? https : http;
-		// Intentional TLS bypass: this proxy exists to render local dev servers
-		// (typically self-signed https) that would otherwise fail. Binds to
-		// 127.0.0.1 behind a path token, and Set-Cookie is dropped, so cookies/
-		// credentials never flow through here — only rendered page content.
+		// TLS validation is controlled by browser.acceptSelfSignedCerts (default on):
+		// local https dev servers are typically self-signed and must render through
+		// the proxy. The server binds to 127.0.0.1 behind a path token, and
+		// Set-Cookie is dropped, so cookies/credentials never flow through here.
+		const rejectUnauthorized = !this._acceptSelfSigned();
 		const preq = lib.request({
 			hostname: target.url.hostname,
 			port: target.url.port || (target.url.protocol === 'https:' ? 443 : 80),
 			path: target.url.pathname + target.url.search,
 			method: req.method,
 			headers: this._outgoingHeaders(req, target, DROP_UPGRADE_HEADERS),
-			rejectUnauthorized: false, // lgtm [js/disabling-certificate-validation]
+			rejectUnauthorized,
 		});
 		preq.on('upgrade', (res: http.IncomingMessage, upSocket: import('stream').Duplex, upHead: Buffer) => {
 			socket.write('HTTP/1.1 101 Switching Protocols\r\n');
@@ -455,8 +462,8 @@ export class FrameProxy {
 		}
 
 		const lib = target.url.protocol === 'https:' ? https : http;
-		// Same intentional TLS bypass as _handleUpgrade (local dev servers, 127.0.0.1
-		// + token binding, no cookies) — see the comment there.
+		// Same TLS setting as _handleUpgrade — see the comment there.
+		const rejectUnauthorized = !this._acceptSelfSigned();
 		const preq = lib.request(
 			{
 				hostname: target.url.hostname,
@@ -464,7 +471,7 @@ export class FrameProxy {
 				path: target.url.pathname + target.url.search,
 				method: req.method || 'GET',
 				headers: this._outgoingHeaders(req, target),
-				rejectUnauthorized: false, // lgtm [js/disabling-certificate-validation]
+				rejectUnauthorized,
 			},
 			(pres) => {
 				this._pipeOrInjectHtml(pres, res, target);

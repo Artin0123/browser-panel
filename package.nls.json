@@ -7,5 +7,6 @@
 	"browser.defaultUrl.description": "Default URL to open in the browser (Home target). Change the port by editing this URL.",
 	"browser.retainContextWhenHidden.description": "Keep the page state (scroll position, forms, JS state, websockets) alive while the view is hidden. Takes effect after reload.",
 	"browser.historyLimit.description": "Maximum number of history entries to keep (oldest are removed first).",
-	"browser.proxyEnabled.description": "Route pages through a local proxy that strips frame-blocking headers (X-Frame-Options / CSP frame-ancestors). Fixes sites that only block embedding; sites that need a real browser session (logins, heavy JS — e.g. PayPal, Microsoft sign-in) still render blank — use Open in external browser for those."
+	"browser.proxyEnabled.description": "Route pages through a local proxy that strips frame-blocking headers (X-Frame-Options / CSP frame-ancestors). Fixes sites that only block embedding; sites that need a real browser session (logins, heavy JS — e.g. PayPal, Microsoft sign-in) still render blank — use Open in external browser for those.",
+	"browser.acceptSelfSignedCerts.description": "Accept self-signed certificates when loading pages and checking reachability. Keep this on for local https dev servers; turn it off to enforce certificate validation on all requests (then self-signed hosts show as unreachable)."
 }

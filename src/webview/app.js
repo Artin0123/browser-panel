@@ -324,14 +324,19 @@ import { svgIcon } from './icons.js';
 	}
 
 	function showError(url, detail, blocked) {
+		// Re-normalize: the URL can be relayed from a message response.
+		const u = normalizeUrl(url);
+		if (u === null) {
+			return;
+		}
 		stopConnecting();
 		stopLoading();
 		clearTimeout(loadTimer);
 		clearReconnect();
 		frame.removeAttribute('src'); // cancel the hanging iframe load
-		errorUrl = url;
+		errorUrl = u;
 		errorTitleEl.textContent = blocked ? S.embedTitle : S.errorTitle;
-		errorDetailEl.textContent = url + ' \u2014 ' + (blocked ? S.embedDetail : detail);
+		errorDetailEl.textContent = u + ' \u2014 ' + (blocked ? S.embedDetail : detail);
 		errorState.hidden = false;
 		viewportWrap.hidden = true;
 		// Auto-reconnect only for reachability failures (not frame-blocked sites).
@@ -391,36 +396,37 @@ import { svgIcon } from './icons.js';
 	}
 
 	function goBack() {
-		const prev = nav.back.pop();
-		if (prev === undefined) {
+		const u = normalizeUrl(nav.back.pop());
+		if (u === null) {
 			return;
 		}
 		if (nav.current) {
 			nav.forward.unshift(nav.current);
 		}
 		programmaticNav = true;
-		startNavigation(prev);
-		lastUrl = prev;
-		vscode.postMessage({ type: 'navigate', url: prev });
+		startNavigation(u);
+		lastUrl = u;
+		vscode.postMessage({ type: 'navigate', url: u });
 	}
 
 	function goForward() {
-		const next = nav.forward.shift();
-		if (next === undefined) {
+		const u = normalizeUrl(nav.forward.shift());
+		if (u === null) {
 			return;
 		}
 		if (nav.current) {
 			nav.back.push(nav.current);
 		}
 		programmaticNav = true;
-		startNavigation(next);
-		lastUrl = next;
-		vscode.postMessage({ type: 'navigate', url: next });
+		startNavigation(u);
+		lastUrl = u;
+		vscode.postMessage({ type: 'navigate', url: u });
 	}
 
 	function reload() {
 		ensureOpen();
-		const u = nav.current || fromProxyUrl(currentUrl()) || errorUrl || lastUrl;
+		// Re-normalize: errorUrl/lastUrl can hold values relayed via messages.
+		const u = normalizeUrl(nav.current || fromProxyUrl(currentUrl()) || errorUrl || lastUrl);
 		if (!u) {
 			return;
 		}
@@ -822,7 +828,7 @@ import { svgIcon } from './icons.js';
 			S = pickStrings(msg.language);
 			applyStrings();
 			urlInput.placeholder = config.defaultUrl;
-			lastUrl = msg.lastUrl || '';
+			lastUrl = normalizeUrl(msg.lastUrl) || '';
 			if (msg.closed === true) {
 				// Explicitly closed last time: stay closed (no auto navigation).
 				closed = true;
@@ -848,13 +854,15 @@ import { svgIcon } from './icons.js';
 				navigate(msg.url);
 			}
 		} else if (msg.type === 'urlStatus') {
-			// Only apply if the user is still on the checked URL (stale responses ignored).
+			// Only apply if the user is still on the checked URL (stale responses
+			// ignored); report against the normalized pending URL, never the raw
+			// message value.
 			if (pendingCheck && msg.url === pendingCheck.url) {
 				if (!msg.ok) {
-					showError(msg.url, msg.error || '', false);
+					showError(pendingCheck.url, msg.error || '', false);
 				} else if (msg.frameBlocked) {
 					// Reachable, but the site refuses to render inside an iframe.
-					showError(msg.url, '', true);
+					showError(pendingCheck.url, '', true);
 				}
 				// ok: keep the connecting bar until the iframe load settles
 			}

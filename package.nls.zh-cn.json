@@ -7,5 +7,6 @@
 	"browser.defaultUrl.description": "浏览器默认打开的网址（主页目标）。修改端口请编辑此网址。",
 	"browser.retainContextWhenHidden.description": "视图隐藏时保持页面状态（滚动位置、表单、JS 状态、WebSocket）。重新加载后生效。",
 	"browser.historyLimit.description": "历史记录最多保留的条数（超出删除最旧）。",
-	"browser.proxyEnabled.description": "通过本地代理加载页面，去除 frame 封锁头（X-Frame-Options / CSP frame-ancestors）。可解决「仅禁止内嵌」的站点；需要真实浏览器会话的站点（登录、重度 JS——如 PayPal、Microsoft 登录页）仍会白屏——此类站点请用「在外部浏览器中打开」。"
+	"browser.proxyEnabled.description": "通过本地代理加载页面，去除 frame 封锁头（X-Frame-Options / CSP frame-ancestors）。可解决「仅禁止内嵌」的站点；需要真实浏览器会话的站点（登录、重度 JS——如 PayPal、Microsoft 登录页）仍会白屏——此类站点请用「在外部浏览器中打开」。",
+	"browser.acceptSelfSignedCerts.description": "加载页面与可达性探测时接受自签名证书。本地 https 开发服务器请保持开启；关闭后所有请求都强制校验证书（自签名主机会显示为无法连接）。"
 }
