@@ -235,6 +235,12 @@ body {
 	border-radius: 3px;
 }
 
+/* Invalid device-emulation custom input (class toggled from app.js). */
+.menu-custom input.invalid {
+	border-color: var(--vscode-errorForeground);
+	color: var(--vscode-errorForeground);
+}
+
 .menu-custom-x {
 	opacity: 0.6;
 }

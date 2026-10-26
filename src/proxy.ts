@@ -58,6 +58,15 @@ const DROP_REQUEST_HEADERS = new Set([
 	'host',
 ]);
 
+/**
+ * Content encodings the proxy offers upstream. HTML responses may be buffered
+ * and decompressed for shim injection, so only encodings _decompressBody can
+ * decode are requested — anything else (e.g. zstd on newer Chromium) would be
+ * served as garbage when the content-encoding header is stripped.
+ */
+const ACCEPT_ENCODING =
+	typeof zlib.zstdDecompressSync === 'function' ? 'gzip, deflate, br, zstd' : 'gzip, deflate, br';
+
 // WebSocket handshake requires Connection + Upgrade; those are hop-by-hop for
 // ordinary HTTP but must be forwarded on the upgrade request.
 const DROP_UPGRADE_HEADERS = new Set(
@@ -73,6 +82,8 @@ export class FrameProxy {
 	private _port = 0;
 	private readonly _token = Math.random().toString(36).slice(2) + Date.now().toString(36);
 	private _lastTarget: ProxyTarget | null = null;
+	// Upgraded (WebSocket) sockets; closeAllConnections doesn't cover them.
+	private readonly _upgradeSockets = new Set<import('stream').Duplex>();
 
 	/**
 	 * Whether to accept self-signed certificates (browser.acceptSelfSignedCerts).
@@ -127,7 +138,15 @@ export class FrameProxy {
 			} catch {
 				// best-effort only
 			}
+			// Destroy upgraded sockets too — server.close() waits on them, so an open
+			// HMR WebSocket would otherwise hang dispose forever.
+			for (const s of this._upgradeSockets) {
+				s.destroy();
+			}
+			this._upgradeSockets.clear();
 			server.close(() => resolve());
+			// Safety net: never hang dispose on unexpected socket states.
+			setTimeout(resolve, 2000).unref();
 		});
 	}
 
@@ -173,8 +192,15 @@ export class FrameProxy {
 		if (!last || !reqUrl || reqUrl.startsWith('/p/')) {
 			return null;
 		}
+		// Reject forms that would let the request pick its own origin (open proxy / SSRF):
+		// protocol-relative //host, absolute-form http://host, and backslash tricks.
+		if (reqUrl.startsWith('//') || reqUrl.includes('\\') || /^[a-zA-Z][a-zA-Z0-9+.-]*:\/\//.test(reqUrl)) {
+			return null;
+		}
 		try {
-			const url = new URL(reqUrl, last.url);
+			// Explicit origin concatenation (not new URL(reqUrl, last.url)): the request
+			// path must never be able to change the target origin.
+			const url = new URL(last.url.origin + reqUrl);
 			return { url };
 		} catch {
 			return null;
@@ -242,6 +268,9 @@ export class FrameProxy {
 			headers[k] = v;
 		}
 		headers.host = target.url.host;
+		// Only offer encodings we can decode (see ACCEPT_ENCODING) — the webview's
+		// Chromium may offer zstd which we otherwise serve back as garbage.
+		headers['accept-encoding'] = ACCEPT_ENCODING;
 		this._rewriteOrigin(headers, target);
 		// Next.js (and similar) send the current page URL in Next-Url; it must be
 		// the target path, not /p/<token>/..., or the router disagrees with itself.
@@ -252,16 +281,30 @@ export class FrameProxy {
 		return headers;
 	}
 
+	/**
+	 * DNS rebinding defense: only accept requests whose Host is this proxy's own
+	 * loopback address (the webview always uses the baseUrl form).
+	 */
+	private _isAllowedHost(host: unknown): boolean {
+		return host === '127.0.0.1:' + this._port || host === 'localhost:' + this._port;
+	}
+
 	private _handleUpgrade(
 		req: http.IncomingMessage,
 		socket: import('stream').Duplex,
 		head: Buffer
 	): void {
+		if (!this._isAllowedHost(req.headers.host)) {
+			socket.destroy();
+			return;
+		}
 		const target = this._resolveTarget(req.url || '');
 		if (!target) {
 			socket.destroy();
 			return;
 		}
+		this._upgradeSockets.add(socket);
+		socket.on('close', () => this._upgradeSockets.delete(socket));
 		const lib = target.url.protocol === 'https:' ? https : http;
 		// TLS validation is controlled by browser.acceptSelfSignedCerts (default on):
 		// local https dev servers are typically self-signed and must render through
@@ -277,8 +320,13 @@ export class FrameProxy {
 			rejectUnauthorized,
 		});
 		preq.on('upgrade', (res: http.IncomingMessage, upSocket: import('stream').Duplex, upHead: Buffer) => {
+			this._upgradeSockets.add(upSocket);
+			upSocket.on('close', () => this._upgradeSockets.delete(upSocket));
 			socket.write('HTTP/1.1 101 Switching Protocols\r\n');
 			for (const [k, v] of Object.entries(res.headers)) {
+				if (k.toLowerCase() === 'set-cookie') {
+					continue; // Set-Cookie is intentionally dropped (see file header)
+				}
 				socket.write(k + ': ' + (Array.isArray(v) ? v.join(', ') : String(v)) + '\r\n');
 			}
 			socket.write('\r\n');
@@ -304,6 +352,20 @@ export class FrameProxy {
 			if (lk === 'x-frame-options' || lk === 'set-cookie') {
 				continue; // strip frame-blocking; drop cookies (logins don't persist via proxy)
 			}
+			// Hop-by-hop headers must not be forwarded (and transfer-encoding in
+			// particular conflicts with the recomputed content-length on the inject
+			// path; passthrough re-chunks automatically).
+			if (
+				lk === 'transfer-encoding' ||
+				lk === 'connection' ||
+				lk === 'keep-alive' ||
+				lk === 'upgrade' ||
+				lk === 'proxy-connection' ||
+				lk === 'te' ||
+				lk === 'trailer'
+			) {
+				continue;
+			}
 			if (lk === 'content-security-policy') {
 				const cleaned = (Array.isArray(v) ? v.join('; ') : String(v))
 					.split(';')
@@ -328,7 +390,8 @@ export class FrameProxy {
 					'/' +
 					locUrl.host +
 					(locUrl.pathname || '/') +
-					(locUrl.search || '');
+					(locUrl.search || '') +
+					(locUrl.hash || '');
 			} catch {
 				delete outHeaders.location;
 			}
@@ -343,13 +406,16 @@ export class FrameProxy {
 	private _decompressBody(buf: Buffer, encoding: string): Buffer {
 		const enc = encoding.toLowerCase();
 		if (enc === 'gzip') {
-			return Buffer.from(zlib.gunzipSync(buf));
+			return Buffer.from(zlib.gunzipSync(buf, { maxOutputLength: HTML_INJECT_MAX_BYTES }));
 		}
 		if (enc === 'deflate') {
-			return Buffer.from(zlib.inflateSync(buf));
+			return Buffer.from(zlib.inflateSync(buf, { maxOutputLength: HTML_INJECT_MAX_BYTES }));
 		}
 		if (enc === 'br') {
-			return Buffer.from(zlib.brotliDecompressSync(buf));
+			return Buffer.from(zlib.brotliDecompressSync(buf, { maxOutputLength: HTML_INJECT_MAX_BYTES }));
+		}
+		if (enc === 'zstd' && typeof zlib.zstdDecompressSync === 'function') {
+			return Buffer.from(zlib.zstdDecompressSync(buf, { maxOutputLength: HTML_INJECT_MAX_BYTES }));
 		}
 		return buf;
 	}
@@ -385,19 +451,27 @@ export class FrameProxy {
 		let size = 0;
 		let passthrough = false;
 
+		// Backpressure: if the client socket is full, pause the upstream until drained.
+		const writeChunk = (chunk: Buffer): void => {
+			if (!res.write(chunk)) {
+				pres.pause();
+				res.once('drain', () => pres.resume());
+			}
+		};
+
 		const startPassthrough = (firstOverflowChunk: Buffer) => {
 			passthrough = true;
 			res.writeHead(pres.statusCode ?? 502, outHeaders);
 			for (const c of chunks) {
-				res.write(c);
+				writeChunk(c);
 			}
 			chunks.length = 0;
-			res.write(firstOverflowChunk);
+			writeChunk(firstOverflowChunk);
 		};
 
 		pres.on('data', (chunk: Buffer) => {
 			if (passthrough) {
-				res.write(chunk);
+				writeChunk(chunk);
 				return;
 			}
 			size += chunk.length;
@@ -443,6 +517,11 @@ export class FrameProxy {
 	}
 
 	private _handle(req: http.IncomingMessage, res: http.ServerResponse): void {
+		if (!this._isAllowedHost(req.headers.host)) {
+			res.writeHead(403);
+			res.end('Forbidden');
+			return;
+		}
 		const reqUrl = req.url || '';
 		// Same-origin shim for proxied pages (CSP script-src 'self' friendly).
 		if (reqUrl.split('?')[0] === this._shimPath) {

@@ -1,5 +1,9 @@
 # Browser Panel
 
+[![Open VSX Version](https://img.shields.io/open-vsx/v/artin/browser-panel)](https://open-vsx.org/extension/artin/browser-panel)
+[![Open VSX Downloads](https://img.shields.io/open-vsx/dt/artin/browser-panel)](https://open-vsx.org/extension/artin/browser-panel)
+[![Visual Studio Marketplace](https://img.shields.io/badge/VS%20Marketplace-artin.browser--panel-0098FF?logo=visualstudiomarketplace&logoColor=white)](https://marketplace.visualstudio.com/items?itemName=artin.browser-panel)
+
 Embedded browser for the VS Code **bottom panel / secondary sidebar** — defaults to `http://localhost:80` for local development preview.
 
 <img src="https://i.ibb.co/Z6yFRLLH/Pix-Pin-2026-08-22-18-26-26.jpg" alt="Pix Pin 2026 08 22 18 26 26" border="0">
@@ -11,7 +15,7 @@ Embedded browser for the VS Code **bottom panel / secondary sidebar** — defaul
 - Back / Forward / **Reload** toolbar icons (official VS Code codicon shapes)
 - **Home** — returns to the configured default URL
 - **DevTools** — opens DevTools for the current page
-- **Connection-error page** — unreachable hosts show a localized error with Open in external browser, plus **auto-reconnect** (10s countdown / Cancel). A progress bar shows while loading
+- **Connection-error page** — unreachable hosts show a localized error with Open in external browser, plus **seamless auto-reconnect** (5s countdown / Cancel; retries run in the background without hiding the error overlay). A progress bar shows while loading
 - **「...」menu**:
   - Settings
   - Open in external browser
@@ -36,7 +40,10 @@ Embedded browser for the VS Code **bottom panel / secondary sidebar** — defaul
 | `browser.retainContextWhenHidden` | `true` | Keep page state (scroll, forms, JS state) alive while the view is hidden. Set to `false` and collapse the panel to fully release the page when unused. Takes effect after reload. |
 
 > **Close vs. hidden**: a webview view is *hidden* when it is not visible in the layout — e.g. switching the panel tab from **Browser** to **Terminal**, collapsing the panel, or switching the activity bar away (minimizing the OS window does *not* count). `retainContextWhenHidden` decides what happens then. The **Close browser** action is separate: it unloads the page (frees memory) and remembers the last URL, but scroll position cannot survive an unload (cross-origin iframe — VS Code cannot read it).
-| `browser.historyLimit` | `200` | Maximum history entries to keep (oldest removed first). |
+
+| Setting | Default | Description |
+|---------|---------|-------------|
+| `browser.historyLimit` | `200` | Maximum history entries to keep (oldest removed first, clamped to 1–10000). |
 | `browser.proxyEnabled` | `false` | Route pages through a local proxy that strips frame-blocking headers (`X-Frame-Options` / CSP `frame-ancestors`). Same proxy for any localhost/http(s) site — not Next.js-specific. Best-effort: logins and JS-hardcoded https URLs may not work. Path-aware SPAs may do one extra navigation to `/` on first load. |
 | `browser.acceptSelfSignedCerts` | `true` | Accept self-signed certificates when loading pages (proxy mode) and during the reachability probe. Keep on for local https dev servers; turn off to enforce certificate validation everywhere (self-signed hosts then show as unreachable). |
 

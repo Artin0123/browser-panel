@@ -39,15 +39,19 @@ interface HistoryPickItem extends vscode.QuickPickItem {
 	url?: string;
 	clearAll?: boolean;
 	removeUrl?: string;
+	removeTimestamp?: number;
 }
 
 const HISTORY_KEY = 'browser.history';
 const LAST_URL_KEY = 'browser.lastUrl';
+const CLOSED_KEY = 'browser.closed';
 
 export class BrowserViewProvider implements vscode.WebviewViewProvider {
 	public static readonly viewType = 'browser.view';
 
 	private _view?: vscode.WebviewView;
+	// Listeners tied to the current webview view instance (disposed on re-resolve/dispose).
+	private _viewDisposables: vscode.Disposable[] = [];
 
 	constructor(private readonly _context: vscode.ExtensionContext, private readonly _proxy: FrameProxy) {}
 
@@ -56,6 +60,8 @@ export class BrowserViewProvider implements vscode.WebviewViewProvider {
 		_context: vscode.WebviewViewResolveContext,
 		_token: vscode.CancellationToken
 	): void {
+		this._viewDisposables.forEach((d) => d.dispose());
+		this._viewDisposables = [];
 		this._view = webviewView;
 
 		webviewView.webview.options = {
@@ -64,7 +70,21 @@ export class BrowserViewProvider implements vscode.WebviewViewProvider {
 		};
 
 		webviewView.webview.html = this._getHtml(webviewView.webview);
-		webviewView.webview.onDidReceiveMessage((msg: WebviewMessage) => this._handleMessage(msg));
+		this._viewDisposables.push(
+			// Drop the stale reference so broadcastConfig()/show() never touch a disposed view.
+			webviewView.onDidDispose(() => {
+				if (this._view === webviewView) {
+					this._view = undefined;
+				}
+			}),
+			// _handleMessage is async: catch rejections (clipboard, commands, ...) so a
+			// failure can never surface as an unhandled rejection in the extension host.
+			webviewView.webview.onDidReceiveMessage((msg: WebviewMessage) => {
+				this._handleMessage(msg).catch((err) => {
+					console.error('[browser-panel] failed to handle webview message:', err);
+				});
+			})
+		);
 	}
 
 	/** Push current settings to the webview (used on config change). */
@@ -80,23 +100,49 @@ export class BrowserViewProvider implements vscode.WebviewViewProvider {
 	}
 
 	private _getHtml(webview: vscode.Webview): string {
-		const webviewDir = vscode.Uri.joinPath(this._context.extensionUri, 'dist', 'webview');
-		const scriptUri = webview.asWebviewUri(vscode.Uri.joinPath(webviewDir, 'app.js'));
-		const styleUri = webview.asWebviewUri(vscode.Uri.joinPath(webviewDir, 'styles.css'));
+		try {
+			const webviewDir = vscode.Uri.joinPath(this._context.extensionUri, 'dist', 'webview');
+			const scriptUri = webview.asWebviewUri(vscode.Uri.joinPath(webviewDir, 'app.js'));
+			const styleUri = webview.asWebviewUri(vscode.Uri.joinPath(webviewDir, 'styles.css'));
 
-		const htmlPath = path.join(this._context.extensionPath, 'dist', 'webview', 'index.html');
-		let html = fs.readFileSync(htmlPath, 'utf8');
-		// CSP must use webview.cspSource (resources are served from the vscode-resource host,
-		// not the webview's own origin, so 'self' alone would block scripts/styles).
-		html = html.split('${cspSource}').join(webview.cspSource);
-		html = html.split('${styleUri}').join(styleUri.toString());
-		html = html.split('${scriptUri}').join(scriptUri.toString());
-		return html;
+			const htmlPath = path.join(this._context.extensionPath, 'dist', 'webview', 'index.html');
+			let html = fs.readFileSync(htmlPath, 'utf8');
+			// CSP must use webview.cspSource (resources are served from the vscode-resource host,
+			// not the webview's own origin, so 'self' alone would block scripts/styles).
+			html = html.split('${cspSource}').join(webview.cspSource);
+			html = html.split('${styleUri}').join(styleUri.toString());
+			html = html.split('${scriptUri}').join(scriptUri.toString());
+			return html;
+		} catch (err) {
+			// Missing/corrupt webview assets must not crash resolveWebviewView with an
+			// internal error — degrade to a minimal explanation page instead.
+			console.error('[browser-panel] failed to load webview html:', err);
+			return (
+				'<!DOCTYPE html><html><body style="font-family:sans-serif;padding:2em">' +
+				'<h2>Browser Panel</h2>' +
+				'<p>Failed to load the webview UI (dist/webview). Please rebuild the extension ' +
+				'(npm run build) and reload the window.</p>' +
+				'</body></html>'
+			);
+		}
 	}
 
 	// ------------------------------------------------------------------ history
 	private _getHistory(): HistoryEntry[] {
-		return this._context.workspaceState.get<HistoryEntry[]>(HISTORY_KEY, []);
+		const raw = this._context.workspaceState.get<unknown>(HISTORY_KEY, []);
+		// Defensive parse: corrupt storage or an older format must not break the
+		// history feature (TypeError in _addHistory / the picker) — filter bad entries.
+		if (!Array.isArray(raw)) {
+			return [];
+		}
+		return raw.filter(
+			(h): h is HistoryEntry =>
+				typeof h === 'object' &&
+				h !== null &&
+				typeof (h as HistoryEntry).url === 'string' &&
+				typeof (h as HistoryEntry).timestamp === 'number' &&
+				Number.isFinite((h as HistoryEntry).timestamp)
+		);
 	}
 
 	private async _addHistory(url: string): Promise<void> {
@@ -104,7 +150,10 @@ export class BrowserViewProvider implements vscode.WebviewViewProvider {
 		const history = this._getHistory();
 		let next: HistoryEntry[];
 		if (history.length > 0 && history[0].url === url) {
-			next = history; // dedupe consecutive entries
+			// Dedupe consecutive entries: still refresh the timestamp and trim to the
+			// limit (it may have shrunk since the entry was added).
+			next = history.slice(0, limit);
+			next[0] = { url, timestamp: Date.now() };
 		} else {
 			next = history.slice(0, limit - 1);
 			next.unshift({ url, timestamp: Date.now() });
@@ -145,7 +194,9 @@ export class BrowserViewProvider implements vscode.WebviewViewProvider {
 		const buildItems = (hist: HistoryEntry[]): HistoryPickItem[] => {
 			const now = new Date();
 			const startOfToday = new Date(now.getFullYear(), now.getMonth(), now.getDate()).getTime();
-			const startOfYesterday = startOfToday - 24 * 60 * 60 * 1000;
+			// Calendar-day arithmetic (not ms subtraction): on DST transition days
+			// "yesterday" is 23 or 25 hours away, so startOfToday - 24h is wrong.
+			const startOfYesterday = new Date(now.getFullYear(), now.getMonth(), now.getDate() - 1).getTime();
 			const groups = [
 				{ label: localize('Today', '今天', '今天'), entries: [] as HistoryEntry[] },
 				{ label: localize('Yesterday', '昨天', '昨天'), entries: [] as HistoryEntry[] },
@@ -178,6 +229,7 @@ export class BrowserViewProvider implements vscode.WebviewViewProvider {
 						description: new Date(h.timestamp).toLocaleString(),
 						url: h.url,
 						removeUrl: h.url,
+						removeTimestamp: h.timestamp,
 						buttons: [removeButton],
 					});
 				}
@@ -195,7 +247,9 @@ export class BrowserViewProvider implements vscode.WebviewViewProvider {
 			}
 			const target = sel as HistoryPickItem;
 			if (target.clearAll) {
-				void this._context.workspaceState.update(HISTORY_KEY, []);
+				// Same contract as the clearStorage message (also clears lastUrl and
+				// notifies the webview); keep the picker open as before.
+				void this._clearStorage();
 				return;
 			}
 			if (target.url) {
@@ -211,7 +265,9 @@ export class BrowserViewProvider implements vscode.WebviewViewProvider {
 			if (!target.removeUrl) {
 				return;
 			}
-			const filtered = this._getHistory().filter((h) => h.url !== target.removeUrl);
+			const filtered = this._getHistory().filter(
+				(h) => !(h.url === target.removeUrl && h.timestamp === target.removeTimestamp)
+			);
 			await this._context.workspaceState.update(HISTORY_KEY, filtered);
 			picker.items = buildItems(filtered);
 		});
@@ -228,7 +284,7 @@ export class BrowserViewProvider implements vscode.WebviewViewProvider {
 					proxy: this._proxyInfo(),
 					language: vscode.env.language,
 					lastUrl: this._context.workspaceState.get<string>(LAST_URL_KEY, ''),
-					closed: this._context.workspaceState.get<boolean>('browser.closed', false),
+					closed: this._context.workspaceState.get<boolean>(CLOSED_KEY, false),
 				});
 				break;
 			case 'navigate':
@@ -260,7 +316,7 @@ export class BrowserViewProvider implements vscode.WebviewViewProvider {
 				break;
 			case 'setClosed':
 				// Persist the explicit closed state so a re-resolve / restart stays closed.
-				await this._context.workspaceState.update('browser.closed', msg.closed === true);
+				await this._context.workspaceState.update(CLOSED_KEY, msg.closed === true);
 				break;
 			case 'clearStorage':
 				await this._clearStorage();
@@ -313,6 +369,12 @@ export class BrowserViewProvider implements vscode.WebviewViewProvider {
 						clearTimeout(timer);
 					}
 					res.resume(); // discard the body, we only care about reachability
+					// Body read can fail mid-stream (ECONNRESET etc.); without this
+					// listener the error throws as an uncaught exception in the host.
+					// Safe even after resolve() — a later resolve is a no-op.
+					res.on('error', (err: Error) => {
+						resolve({ ok: false, error: err.message });
+					});
 					const status = res.statusCode ?? 502;
 					if (status >= 300 && status < 400 && res.headers.location && depth < 3) {
 						try {
@@ -323,9 +385,10 @@ export class BrowserViewProvider implements vscode.WebviewViewProvider {
 						}
 						return;
 					}
-					// Frame-blocking detection (only when the proxy is off — the proxy strips these).
+					// Frame-blocking detection (only when the proxy is actually serving —
+					// it strips these headers; intent alone would misreport if start() failed).
 					const frameBlocked =
-						!getConfig().proxyEnabled &&
+						!(getConfig().proxyEnabled && this._proxy.listening) &&
 						(!!res.headers['x-frame-options'] ||
 							/frame-ancestors/i.test(String(res.headers['content-security-policy'] || '')));
 					resolve({ ok: true, frameBlocked });

@@ -1,6 +1,40 @@
 # Changelog
 
-## [Unreleased]
+## [0.4.0] - 2026-10-26
+
+### Security
+
+- Proxy: closed the **token bypass** — a root-relative request target could pick its own origin via protocol-relative (`//host`), absolute-form (`GET http://host/`) or backslash paths and fetch arbitrary origins without the token (open proxy / SSRF). The fallback now pins the target origin, and such request targets are rejected
+- Proxy: **Host header validation** (DNS rebinding defense) — only `127.0.0.1:<port>` / `localhost:<port>` are accepted; other Host values get 403 / socket destroy
+- Proxy: response **decompression is capped** at the 5 MB inject limit (`maxOutputLength` for gzip/deflate/brotli); oversized bodies fall back to raw passthrough instead of unbounded synchronous decompression (previously a ~0.15 MB gzip could inflate to 150 MB and stall the extension host's event loop)
+- Proxy: `Set-Cookie` is no longer forwarded on WebSocket 101 upgrades (consistent with the HTTP path)
+
+### Fixed
+
+- Proxy: proxied HTML no longer renders as **garbage on sites that answer with `zstd`** (e.g. google.com): the proxy only requests encodings it can decode (`gzip, deflate, br`, plus `zstd` when the runtime supports it) and decompresses zstd for shim injection instead of serving compressed bytes as text
+- Proxy: upstream **chunked responses no longer produce an invalid reply** (a buffered HTML injection kept `Transfer-Encoding: chunked` alongside the recomputed `Content-Length`, crashing clients with a parse error); hop-by-hop response headers (`connection`, `keep-alive`, …) are now stripped
+- Proxy: `dispose()` no longer **hangs on live WebSocket (HMR) connections** — upgraded sockets are destroyed and a 2 s safety timeout guarantees resolution (previously it could stall the serialized proxy toggle forever)
+- Proxy: redirect `Location` rewriting keeps the `#fragment`
+- Proxy: passthrough streaming honors backpressure (no unbounded buffering on slow clients)
+- webview: proxy URLs keep the **`#hash`** (hash-router SPAs work with the proxy on; redirects round-trip fragments too)
+- webview: URLs with basic-auth credentials (`http://user:pass@host`) fall back to direct mode with a localized hint instead of silently dropping the credentials
+- webview: multi-line pasted input no longer navigates to a garbage host (`http://a\nhttp://b` was normalized into one broken URL); plain spaces are still accepted and percent-encoded so paths like `example.com/my page` keep working
+- webview: pressing Enter / Reload on the **same URL now actually reloads** (previously a silent no-op with the loading bar stuck until the 20 s timer)
+- webview: stale probe results after closing the browser no longer bring up the error page or start auto-reconnect
+- webview: **Clear storage** now also clears the back/forward stacks
+- webview: back/forward can no longer get stuck (programmatic-navigation flag resets on error, invalid history entries are peek-validated before popping)
+- host: probe response errors (mid-body `ECONNRESET`) no longer crash the extension host
+- host: the view reference is cleared on dispose; webview message handler rejections are logged instead of escaping as unhandled rejections
+- host: frame-blocked detection now uses the proxy's actual listening state (previously a failed proxy start made blocked sites render blank without the explanation page)
+- host: history hardening — corrupt/legacy persisted entries are filtered, consecutive-dedupe refreshes the timestamp, per-entry delete removes exactly one entry, QuickPick “Clear all” matches the webview contract (also clears last URL), and `historyLimit` is validated (clamped 1–10000) so a bad value can't wipe history
+- host: history QuickPick “yesterday” grouping is DST-safe
+- i18n: `zh-HK` / `zh-MO` now select Traditional Chinese; missing keys fall back to English instead of `undefined`
+
+### Changed
+
+- Moved the device-emulation `.invalid` input style from an inline `<style>` in the webview HTML to `styles.css`
+
+## [0.3.18] - 2026-10-26
 
 ### Changed
 

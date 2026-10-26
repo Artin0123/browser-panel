@@ -55,6 +55,7 @@ import { svgIcon } from './icons.js';
 			emptyTitle: 'Browser closed', emptyReopen: 'Reopen',
 			errorTitle: 'Cannot connect',
 			embedTitle: 'Site cannot be embedded', embedDetail: 'The site blocks embedding (X-Frame-Options / CSP frame-ancestors). Use "Open in external browser" or enable the browser.proxyEnabled setting.',
+			proxyAuthNote: 'The URL contains credentials (user:pass) that the proxy cannot forward; the site is loaded directly instead.',
 			reconnectIn: 'Retrying in {n}s\u2026',
 			cancelReconnect: 'Cancel auto-retry',
 			devices: { 'iphone-se': 'iPhone SE (375\u00d7667)', 'iphone-14': 'iPhone 14 (390\u00d7844)', 'iphone-plus': 'iPhone Plus (414\u00d7896)', pixel: 'Pixel 7 (412\u00d7915)', ipad: 'iPad (768\u00d71024)', 'ipad-air': 'iPad Air (820\u00d71180)', 'surface-duo': 'Surface Duo (912\u00d71368)' },
@@ -71,6 +72,7 @@ import { svgIcon } from './icons.js';
 			emptyTitle: '浏览器已关闭', emptyReopen: '重新打开',
 			errorTitle: '无法连接',
 			embedTitle: '网站无法内嵌', embedDetail: '该网站禁止内嵌（X-Frame-Options / CSP frame-ancestors）。请使用「在外部浏览器中打开」，或开启 browser.proxyEnabled 设置。',
+			proxyAuthNote: '网址包含认证信息（user:pass），Proxy 无法转发，已改为直接连接加载。',
 			reconnectIn: '{n} 秒后自动重试\u2026',
 			cancelReconnect: '取消自动重试',
 			devices: { 'iphone-se': 'iPhone SE (375\u00d7667)', 'iphone-14': 'iPhone 14 (390\u00d7844)', 'iphone-plus': 'iPhone Plus (414\u00d7896)', pixel: 'Pixel 7 (412\u00d7915)', ipad: 'iPad (768\u00d71024)', 'ipad-air': 'iPad Air (820\u00d71180)', 'surface-duo': 'Surface Duo (912\u00d71368)' },
@@ -87,6 +89,7 @@ import { svgIcon } from './icons.js';
 			emptyTitle: '瀏覽器已關閉', emptyReopen: '重新開啟',
 			errorTitle: '無法連線',
 			embedTitle: '網站無法內嵌', embedDetail: '該網站禁止內嵌（X-Frame-Options / CSP frame-ancestors）。請使用「在外部瀏覽器開啟」，或開啟 browser.proxyEnabled 設定。',
+			proxyAuthNote: '網址包含認證資訊（user:pass），Proxy 無法轉發，已改為直接連線載入。',
 			reconnectIn: '{n} 秒後自動重試\u2026',
 			cancelReconnect: '取消自動重試',
 			devices: { 'iphone-se': 'iPhone SE (375\u00d7667)', 'iphone-14': 'iPhone 14 (390\u00d7844)', 'iphone-plus': 'iPhone Plus (414\u00d7896)', pixel: 'Pixel 7 (412\u00d7915)', ipad: 'iPad (768\u00d71024)', 'ipad-air': 'iPad Air (820\u00d71180)', 'surface-duo': 'Surface Duo (912\u00d71368)' },
@@ -95,12 +98,22 @@ import { svgIcon } from './icons.js';
 
 	let S = STRINGS.en;
 
+	/** Shallow-merge a locale over en so missing keys never render as undefined. */
+	function mergeStrings(locale) {
+		return Object.assign({}, STRINGS.en, locale, {
+			devices: Object.assign({}, STRINGS.en.devices, locale.devices),
+		});
+	}
+
 	function pickStrings(lang) {
 		const l = (lang || '').toLowerCase();
 		if (l.startsWith('zh')) {
-			return l.includes('tw') || l.includes('hant') ? STRINGS['zh-tw'] : STRINGS['zh-cn'];
+			// hk/mo use traditional Chinese too.
+			return l.includes('tw') || l.includes('hant') || l.includes('hk') || l.includes('mo')
+				? mergeStrings(STRINGS['zh-tw'])
+				: mergeStrings(STRINGS['zh-cn']);
 		}
-		return STRINGS.en;
+		return mergeStrings(STRINGS.en);
 	}
 
 	// ---------------------------------------------------------------------------
@@ -150,8 +163,16 @@ import { svgIcon } from './icons.js';
 	 * which input path it came from (address bar, history, or postMessage).
 	 */
 	function normalizeUrl(raw) {
-		const url = (raw || '').trim();
-		if (!url) {
+		if (typeof raw !== 'string') {
+			return null;
+		}
+		const url = raw.trim();
+		// Multi-line pastes ("http://a\nhttp://b") must never reach the URL parser:
+		// they would concatenate into a garbage host and actually navigate. Only
+		// line-breaking whitespace is rejected — plain spaces are left to the URL
+		// parser, which percent-encodes them in the path ("a/my page" is a legal
+		// paste) and throws for spaces in the host.
+		if (!url || /[\n\r\t\f\v]/.test(url)) {
 			return null;
 		}
 		try {
@@ -179,6 +200,10 @@ import { svgIcon } from './icons.js';
 		}
 	}
 
+	// Bumped on every iframe src mutation so a pending force-reload callback can
+	// detect that the frame state moved on (error page, close, …) and back off.
+	let frameSrcSeq = 0;
+
 	/** Translate a target URL into the proxy URL (identity when the proxy is off). */
 	function toProxyUrl(u) {
 		if (!proxy.enabled || !proxy.baseUrl) {
@@ -186,7 +211,12 @@ import { svgIcon } from './icons.js';
 		}
 		try {
 			const url = new URL(u);
-			return proxy.baseUrl + url.protocol.slice(0, -1) + '/' + url.host + url.pathname + url.search;
+			if (url.username) {
+				// The proxy cannot carry URL credentials: fall back to a direct load
+				// (warnProxyAuth tells the user).
+				return u;
+			}
+			return proxy.baseUrl + url.protocol.slice(0, -1) + '/' + url.host + url.pathname + url.search + url.hash;
 		} catch {
 			return u;
 		}
@@ -210,13 +240,62 @@ import { svgIcon } from './icons.js';
 		return scheme + '://' + host + path;
 	}
 
-	function loadUrl(u) {
-		const src = toProxyUrl(u);
-		if (frame.getAttribute('src') !== src) {
-			frame.setAttribute('src', src);
+	function clearFrameSrc() {
+		frameSrcSeq++;
+		frame.removeAttribute('src');
+	}
+
+	/**
+	 * Set the iframe src, forcing a real navigation when the value is unchanged:
+	 * a same-value setAttribute is a no-op and its 'load' event never fires (the
+	 * loading state would hang for the full 20s safety timeout). Cross-origin
+	 * iframes cannot be reloaded via contentWindow.location.reload(), so drop src
+	 * and restore it on the next frame instead.
+	 */
+	function setFrameSrc(src) {
+		if (frame.getAttribute('src') === src) {
+			const seq = ++frameSrcSeq;
+			frame.removeAttribute('src');
+			requestAnimationFrame(() => {
+				// Skip when the frame moved on meanwhile (error page, close, reconnect).
+				if (seq === frameSrcSeq) {
+					frame.setAttribute('src', src);
+				}
+			});
+			return;
 		}
+		frameSrcSeq++;
+		frame.setAttribute('src', src);
+	}
+
+	/**
+	 * Proxy mode cannot carry URL credentials (user:pass@host) — toProxyUrl falls
+	 * back to a direct load. Surface that via the error panel as a transient
+	 * notice: the iframe 'load' (direct render succeeded) dismisses it and a
+	 * probe failure replaces it with the regular error page.
+	 */
+	function warnProxyAuth(u) {
+		if (!proxy.enabled) {
+			return;
+		}
+		let hasAuth = false;
+		try {
+			hasAuth = !!new URL(u).username;
+		} catch { }
+		if (hasAuth) {
+			errorUrl = u;
+			errorTitleEl.textContent = S.proxyAuthNote;
+			errorDetailEl.textContent = u;
+			errorState.hidden = false;
+			errorReconnectBlock.classList.add('is-idle');
+		}
+	}
+
+	function loadUrl(u) {
+		setFrameSrc(toProxyUrl(u));
 		nav.current = u;
 		urlInput.value = u;
+		warnProxyAuth(u);
 	}
 
 	// ---------------------------------------------------------------------------
@@ -264,7 +343,7 @@ import { svgIcon } from './icons.js';
 	}
 
 	function updateReconnectLabel() {
-		errorReconnectEl.textContent = S.reconnectIn.replace('{n}', String(reconnectSecondsLeft));
+		errorReconnectEl.textContent = (S.reconnectIn || '').replace('{n}', String(reconnectSecondsLeft));
 	}
 
 	function startReconnect(url) {
@@ -307,7 +386,7 @@ import { svgIcon } from './icons.js';
 			return;
 		}
 		reconnectAttemptPending = true;
-		frame.setAttribute('src', toProxyUrl(u));
+		setFrameSrc(toProxyUrl(u));
 		const id = ++checkSeq;
 		pendingCheck = { id, url: u };
 		vscode.postMessage({ type: 'checkUrl', url: u });
@@ -333,7 +412,10 @@ import { svgIcon } from './icons.js';
 		stopLoading();
 		clearTimeout(loadTimer);
 		clearReconnect();
-		frame.removeAttribute('src'); // cancel the hanging iframe load
+		// A failed navigation must not leave programmaticNav set (it would eat the
+		// next in-iframe navigation's back/forward bookkeeping).
+		programmaticNav = false;
+		clearFrameSrc(); // cancel the hanging iframe load
 		errorUrl = u;
 		errorTitleEl.textContent = blocked ? S.embedTitle : S.errorTitle;
 		errorDetailEl.textContent = u + ' \u2014 ' + (blocked ? S.embedDetail : detail);
@@ -341,11 +423,12 @@ import { svgIcon } from './icons.js';
 		viewportWrap.hidden = true;
 		// Auto-reconnect only for reachability failures (not frame-blocked sites).
 		if (!blocked) {
-			startReconnect(url);
+			startReconnect(u);
 		}
 	}
 
 	function hideError() {
+		programmaticNav = false;
 		clearReconnect();
 		errorState.hidden = true;
 		errorUrl = '';
@@ -396,29 +479,45 @@ import { svgIcon } from './icons.js';
 	}
 
 	function goBack() {
-		const u = normalizeUrl(nav.back.pop());
+		// Peek first: only pop once the entry is usable (a dropped entry must
+		// still refresh the button states).
+		const u = normalizeUrl(nav.back[nav.back.length - 1]);
 		if (u === null) {
+			if (nav.back.length) {
+				nav.back.pop();
+				updateButtons();
+			}
 			return;
 		}
+		nav.back.pop();
 		if (nav.current) {
 			nav.forward.unshift(nav.current);
 		}
-		programmaticNav = true;
 		startNavigation(u);
+		// Set after startNavigation: its hideError() clears the flag, and the load
+		// event that consumes it always fires later.
+		programmaticNav = true;
 		lastUrl = u;
 		vscode.postMessage({ type: 'navigate', url: u });
 	}
 
 	function goForward() {
-		const u = normalizeUrl(nav.forward.shift());
+		// Peek first: only shift once the entry is usable.
+		const u = normalizeUrl(nav.forward[0]);
 		if (u === null) {
+			if (nav.forward.length) {
+				nav.forward.shift();
+				updateButtons();
+			}
 			return;
 		}
+		nav.forward.shift();
 		if (nav.current) {
 			nav.back.push(nav.current);
 		}
-		programmaticNav = true;
 		startNavigation(u);
+		// Set after startNavigation (see goBack).
+		programmaticNav = true;
 		lastUrl = u;
 		vscode.postMessage({ type: 'navigate', url: u });
 	}
@@ -432,9 +531,10 @@ import { svgIcon } from './icons.js';
 		}
 		hideError();
 		// contentWindow.location is blocked cross-origin; re-setting src works everywhere.
-		frame.setAttribute('src', toProxyUrl(u));
+		setFrameSrc(toProxyUrl(u));
 		nav.current = u;
 		urlInput.value = u;
+		warnProxyAuth(u);
 		btnReload.classList.add('loading');
 		showConnecting();
 		const id = ++checkSeq;
@@ -558,10 +658,11 @@ import { svgIcon } from './icons.js';
 		nav.back = [];
 		nav.forward = [];
 		nav.current = '';
+		pendingCheck = null; // an in-flight probe must not paint an error page after close
 		stopConnecting();
 		stopLoading();
 		hideError();
-		frame.removeAttribute('src'); // unloads the page, frees its memory
+		clearFrameSrc(); // unloads the page, frees its memory
 		urlInput.value = lastUrl || config.defaultUrl; // keep last URL visible while closed
 		closed = true;
 		viewportWrap.hidden = true;
@@ -720,10 +821,15 @@ import { svgIcon } from './icons.js';
 		const applyCustom = () => {
 			const w = parseInt(wInput.value, 10);
 			const h = parseInt(hInput.value, 10);
-			if (w && h) {
+			const wOk = Number.isFinite(w);
+			const hOk = Number.isFinite(h);
+			wInput.classList.toggle('invalid', !wOk);
+			hInput.classList.toggle('invalid', !hOk);
+			if (wOk && hOk) {
+				// Clamp to the same range as the inputs' min/max attributes.
 				device.preset = 'custom';
-				device.width = w;
-				device.height = h;
+				device.width = Math.min(Math.max(w, 240), 9999);
+				device.height = Math.min(Math.max(h, 200), 9999);
 				applyDevice();
 				renderDeviceMenu(); // move the checkmark from the old option to Custom
 			}
@@ -731,6 +837,8 @@ import { svgIcon } from './icons.js';
 		applyBtn.addEventListener('click', (e) => { e.stopPropagation(); applyCustom(); });
 		wInput.addEventListener('keydown', (e) => { e.stopPropagation(); if (e.key === 'Enter') { applyCustom(); } });
 		hInput.addEventListener('keydown', (e) => { e.stopPropagation(); if (e.key === 'Enter') { applyCustom(); } });
+		wInput.addEventListener('input', () => wInput.classList.remove('invalid'));
+		hInput.addEventListener('input', () => hInput.classList.remove('invalid'));
 		customRow.appendChild(wInput);
 		customRow.appendChild(xMark);
 		customRow.appendChild(hInput);
@@ -854,6 +962,11 @@ import { svgIcon } from './icons.js';
 				navigate(msg.url);
 			}
 		} else if (msg.type === 'urlStatus') {
+			// The browser was closed: never paint an error page or arm a reconnect
+			// for a probe that was in flight when it closed.
+			if (closed) {
+				return;
+			}
 			// Only apply if the user is still on the checked URL (stale responses
 			// ignored); report against the normalized pending URL, never the raw
 			// message value.
@@ -869,6 +982,10 @@ import { svgIcon } from './icons.js';
 		} else if (msg.type === 'storageCleared') {
 			// Host cleared history + lastUrl; reload the page to drop in-memory state.
 			lastUrl = '';
+			nav.back = [];
+			nav.forward = [];
+			nav.current = '';
+			updateButtons();
 			if (!closed) {
 				reload();
 			} else {

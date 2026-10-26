@@ -28,13 +28,36 @@ export function activate(context: vscode.ExtensionContext): void {
 	// Serialized so concurrent config events can never interleave start/dispose
 	// (which would leak servers and change the port -> endless rerouting).
 	let proxyQueue: Promise<void> = Promise.resolve();
+	// Guard against a hung start()/dispose() (e.g. dispose waiting on long-lived
+	// connections): race a timeout so the serialized queue can never stall for
+	// good. The underlying op keeps running; a late rejection is swallowed to
+	// avoid an unhandled rejection after the race has settled.
+	const PROXY_APPLY_TIMEOUT_MS = 5000;
 	const applyProxyInner = async (): Promise<void> => {
 		try {
 			const enabled = getConfig().proxyEnabled;
-			if (enabled && !proxy.listening) {
-				await proxy.start();
-			} else if (!enabled && proxy.listening) {
-				await proxy.dispose();
+			const op =
+				enabled && !proxy.listening
+					? proxy.start()
+					: !enabled && proxy.listening
+						? proxy.dispose()
+						: undefined;
+			if (op) {
+				op.catch(() => {});
+				let timer: NodeJS.Timeout | undefined;
+				try {
+					await Promise.race([
+						op,
+						new Promise<never>((_, reject) => {
+							timer = setTimeout(
+								() => reject(new Error('start/dispose timed out after ' + PROXY_APPLY_TIMEOUT_MS + 'ms, continuing')),
+								PROXY_APPLY_TIMEOUT_MS
+							);
+						}),
+					]);
+				} finally {
+					clearTimeout(timer);
+				}
 			}
 		} catch (err) {
 			void vscode.window.showWarningMessage(

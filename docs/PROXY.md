@@ -18,6 +18,8 @@
 <script src="/p/<token>/__bp_shim.js"></script>
 ```
 
+代理只向上游请求自己能解压的编码（`gzip`、`deflate`、`br`，运行时支持时含 `zstd`），否则压缩响应会被当作 HTML 处理而渲染成乱码。
+
 脚本与页面同属代理 origin，将 `window.open`、`a[target=_blank|_new]` 以及 Clipboard API 失败时的写入，经 `parent.postMessage` 交给 webview：另开走 `openExternal`，复制走 `copyText` → `vscode.env.clipboard.writeText`（不依赖 webview 自己的 Clipboard Permissions-Policy）。不注入 `<base>`、不改写路径。超过约 5MB 的 HTML（含无 `Content-Length`、边收边超限）**跳过注入并原样串流**，不再回 502。
 
 ## URL 形态
@@ -26,8 +28,8 @@
 http://127.0.0.1:<port>/p/<token>/<scheme>/<host>/<path>
 ```
 
-- `token` 防止本机其它进程把它当开放代理。
-- 根相对路径（`/_next/static/...`、`/api/...`）落到代理根上，按「上一次解析到的目标」转发。
+- `token` 防止本机其它进程把它当开放代理；v0.4.0 起另验证 `Host` 头必须是代理自身地址（`127.0.0.1:<port>` / `localhost:<port>`），其余一律 403 / 断开，防 DNS rebinding 与借用代理。
+- 根相对路径（`/_next/static/...`、`/api/...`）落到代理根上，按「上一次解析到的目标」转发；目标 origin 由代理侧拼接锁定，请求路径不能改写目标（`//host`、绝对形式、反斜线等请求目标会被拒绝）。
 - 地址栏始终显示真实目标 URL，不显示代理 URL。
 
 ## 2026-08-22：开启 proxy 后页面闪烁（pi-web / Next.js）
@@ -73,7 +75,7 @@ iframe 第一次仍落在 `/p/<token>/http/host/`。Next 看到 pathname 对不�
 
 ## 其它已知边界
 
-- `Set-Cookie` 故意丢弃；走 proxy 的登录不持久。
+- `Set-Cookie` 故意丢弃（HTTP 响应与 WebSocket upgrade 握手都不转发）；走 proxy 的登录不持久。
 - JS 写死的绝对 `https://` URL 会绕过代理。
 - 单一 `_lastTarget`：同时只服务当前这一个 iframe。
 - 跨源 iframe 读不到 `contentWindow.location`，地址栏跟的是 `iframe.src` 属性，站内再跳到 `/` 时栏上可能仍显示你输入的 URL。
