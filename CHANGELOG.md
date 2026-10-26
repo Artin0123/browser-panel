@@ -1,5 +1,11 @@
 # Changelog
 
+## [Unreleased]
+
+### Changed
+
+- **Seamless auto-reconnect**: background retries no longer hide the error overlay while the page loads (the blank iframe used to flash white on every 10s attempt); the page is revealed only after the iframe has actually rendered. Retry interval shortened from 10s to **5s**
+
 ## [0.3.17] - 2026-09-18
 
 ### Added

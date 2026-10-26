@@ -34,7 +34,7 @@ import { svgIcon } from './icons.js';
 	const btnErrorExternal = document.getElementById('btn-error-external');
 	const zoomLayer = document.getElementById('zoom-layer');
 
-	const RECONNECT_INTERVAL_SEC = 10;
+	const RECONNECT_INTERVAL_SEC = 5;
 
 	/** @type {{ defaultUrl: string, retainContextWhenHidden: boolean, historyLimit: number }} */
 	let config = { defaultUrl: 'http://localhost:80', retainContextWhenHidden: true, historyLimit: 200 };
@@ -224,6 +224,7 @@ import { svgIcon } from './icons.js';
 	let reconnectSecondsLeft = 0;
 	let reconnectCountdownTimer = null;
 	let reconnectArmed = false; // auto-retry scheduled (not cancelled)
+	let reconnectAttemptPending = false; // a background retry navigation is in flight
 
 	function stopLoading() {
 		btnReload.classList.remove('loading');
@@ -248,6 +249,7 @@ import { svgIcon } from './icons.js';
 		reconnectUrl = '';
 		reconnectSecondsLeft = 0;
 		reconnectArmed = false;
+		reconnectAttemptPending = false;
 		errorReconnectBlock.classList.add('is-idle');
 		errorReconnectEl.textContent = '\u00a0';
 	}
@@ -270,23 +272,42 @@ import { svgIcon } from './icons.js';
 			}
 			reconnectSecondsLeft -= 1;
 			if (reconnectSecondsLeft <= 0) {
-				clearInterval(reconnectCountdownTimer);
-				reconnectCountdownTimer = null;
-				runReconnect();
+				// Retry in the background, then restart the countdown for the next round.
+				reconnectSecondsLeft = RECONNECT_INTERVAL_SEC;
+				updateReconnectLabel();
+				attemptReconnect();
 				return;
 			}
 			updateReconnectLabel();
 		}, 1000);
 	}
 
-	function runReconnect() {
+	/**
+	 * Background retry for the auto-reconnect loop. Unlike a regular navigation
+	 * it never reveals the viewport while the attempt is in flight — the blank
+	 * iframe (white background) would flash otherwise. The iframe 'load' handler
+	 * reveals the page only once it has actually rendered; a failed probe just
+	 * re-enters showError() (already on screen) and rearms the countdown.
+	 */
+	function attemptReconnect() {
 		const u = reconnectUrl;
-		if (!u || closed) {
-			clearReconnect();
+		if (!u || closed || reconnectAttemptPending) {
+			if (closed) {
+				clearReconnect();
+			}
 			return;
 		}
-		clearReconnect();
-		navigate(u, { record: false });
+		reconnectAttemptPending = true;
+		frame.setAttribute('src', toProxyUrl(u));
+		const id = ++checkSeq;
+		pendingCheck = { id, url: u };
+		vscode.postMessage({ type: 'checkUrl', url: u });
+		clearTimeout(loadTimer);
+		// Safety net: if the attempt neither loads nor gets a probe response,
+		// allow the next scheduled retry to proceed.
+		loadTimer = setTimeout(() => {
+			reconnectAttemptPending = false;
+		}, 20000);
 	}
 
 	function cancelReconnect() {
@@ -421,6 +442,7 @@ import { svgIcon } from './icons.js';
 			return; // ignore about:blank loads (e.g. right after close)
 		}
 		clearTimeout(loadTimer);
+		pendingCheck = null; // load settled; any in-flight probe response is stale
 		stopConnecting();
 		hideError();
 		// Only programmatic back/forward update the stacks synchronously;
