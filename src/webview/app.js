@@ -142,15 +142,24 @@ import { svgIcon } from './icons.js';
 	// ---------------------------------------------------------------------------
 	// Navigation
 	// ---------------------------------------------------------------------------
+	/**
+	 * Normalize input to an absolute http(s) URL, or null if unsupported.
+	 * Only http/https can be embedded (webview CSP: frame-src http: https:);
+	 * parsing — instead of string tests — guarantees no other scheme
+	 * (javascript:, file:, vscode:, …) ever reaches the iframe src, no matter
+	 * which input path it came from (address bar, history, or postMessage).
+	 */
 	function normalizeUrl(raw) {
 		const url = (raw || '').trim();
 		if (!url) {
 			return null;
 		}
-		if (/^[a-zA-Z][a-zA-Z0-9+.-]*:\/\//.test(url)) {
-			return url;
+		try {
+			const u = new URL(/^[a-zA-Z][a-zA-Z0-9+.-]*:\/\//.test(url) ? url : 'http://' + url);
+			return u.protocol === 'http:' || u.protocol === 'https:' ? u.href : null;
+		} catch {
+			return null;
 		}
-		return 'http://' + url;
 	}
 
 	function currentUrl() {
@@ -793,15 +802,19 @@ import { svgIcon } from './icons.js';
 		if (!msg || typeof msg.type !== 'string') {
 			return;
 		}
-		// Messages from the proxied page (shim) — same channel as host posts.
-		if (msg.type === 'openExternal' && typeof msg.url === 'string' && msg.url) {
-			vscode.postMessage({ type: 'openExternal', url: msg.url });
-			return;
-		}
-		if (msg.type === 'copy' && typeof msg.text === 'string') {
-			// Prefer extension-host clipboard (webview Permissions-Policy often still blocks).
-			vscode.postMessage({ type: 'copyText', text: msg.text });
-			return;
+		// Bridge from the embedded page (shim or direct postMessage): only accept
+		// relays whose sender is the iframe itself, never another window.
+		if (event.source === frame.contentWindow) {
+			if (msg.type === 'openExternal' && typeof msg.url === 'string' && msg.url) {
+				// Scheme is re-validated host-side (openExternal); relay as-is.
+				vscode.postMessage({ type: 'openExternal', url: msg.url });
+				return;
+			}
+			if (msg.type === 'copy' && typeof msg.text === 'string') {
+				// Prefer extension-host clipboard (webview Permissions-Policy often still blocks).
+				vscode.postMessage({ type: 'copyText', text: msg.text });
+				return;
+			}
 		}
 		if (msg.type === 'config') {
 			config = Object.assign({}, config, msg.config);

@@ -240,7 +240,9 @@ export class BrowserViewProvider implements vscode.WebviewViewProvider {
 				await this._openDevtools();
 				break;
 			case 'openExternal':
-				if (msg.url) {
+				// Only http/https: the relay is fed by embedded pages, so other schemes
+				// (file:, vscode:, custom protocol handlers) must never reach openExternal.
+				if (msg.url && /^https?:\/\//i.test(msg.url)) {
 					void vscode.env.openExternal(vscode.Uri.parse(msg.url));
 				}
 				break;
@@ -299,11 +301,12 @@ export class BrowserViewProvider implements vscode.WebviewViewProvider {
 			}
 			const lib = u.protocol === 'https:' ? https : http;
 			let timer: NodeJS.Timeout | undefined;
-			// rejectUnauthorized: false — the probe only checks reachability; self-signed
-			// certs (typical for local https dev) must not be misreported as unreachable.
+			// Intentional TLS bypass: the probe only checks reachability; self-signed
+			// certs (typical for local https dev) must not be misreported as
+			// unreachable. No credentials are sent (cookies don't exist here).
 			const req = lib.get(
 				u,
-				{ headers: { 'user-agent': 'browser-panel' }, rejectUnauthorized: false },
+				{ headers: { 'user-agent': 'browser-panel' }, rejectUnauthorized: false }, // lgtm [js/disabling-certificate-validation]
 				(res) => {
 					if (timer) {
 						clearTimeout(timer);

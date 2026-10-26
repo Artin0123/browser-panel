@@ -257,13 +257,17 @@ export class FrameProxy {
 			return;
 		}
 		const lib = target.url.protocol === 'https:' ? https : http;
+		// Intentional TLS bypass: this proxy exists to render local dev servers
+		// (typically self-signed https) that would otherwise fail. Binds to
+		// 127.0.0.1 behind a path token, and Set-Cookie is dropped, so cookies/
+		// credentials never flow through here — only rendered page content.
 		const preq = lib.request({
 			hostname: target.url.hostname,
 			port: target.url.port || (target.url.protocol === 'https:' ? 443 : 80),
 			path: target.url.pathname + target.url.search,
 			method: req.method,
 			headers: this._outgoingHeaders(req, target, DROP_UPGRADE_HEADERS),
-			rejectUnauthorized: false,
+			rejectUnauthorized: false, // lgtm [js/disabling-certificate-validation]
 		});
 		preq.on('upgrade', (res: http.IncomingMessage, upSocket: import('stream').Duplex, upHead: Buffer) => {
 			socket.write('HTTP/1.1 101 Switching Protocols\r\n');
@@ -451,6 +455,8 @@ export class FrameProxy {
 		}
 
 		const lib = target.url.protocol === 'https:' ? https : http;
+		// Same intentional TLS bypass as _handleUpgrade (local dev servers, 127.0.0.1
+		// + token binding, no cookies) — see the comment there.
 		const preq = lib.request(
 			{
 				hostname: target.url.hostname,
@@ -458,7 +464,7 @@ export class FrameProxy {
 				path: target.url.pathname + target.url.search,
 				method: req.method || 'GET',
 				headers: this._outgoingHeaders(req, target),
-				rejectUnauthorized: false,
+				rejectUnauthorized: false, // lgtm [js/disabling-certificate-validation]
 			},
 			(pres) => {
 				this._pipeOrInjectHtml(pres, res, target);
