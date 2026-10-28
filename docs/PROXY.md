@@ -30,6 +30,8 @@ http://127.0.0.1:<port>/p/<token>/<scheme>/<host>/<path>
 
 - `token` 防止本机其它进程把它当开放代理；v0.4.0 起另验证 `Host` 头必须是代理自身地址（`127.0.0.1:<port>` / `localhost:<port>`），其余一律 403 / 断开，防 DNS rebinding 与借用代理。
 - 根相对路径（`/_next/static/...`、`/api/...`）落到代理根上，按「上一次解析到的目标」转发；目标 origin 由代理侧拼接锁定，请求路径不能改写目标（`//host`、绝对形式、反斜线等请求目标会被拒绝）。
+- **文档导航 bounce（v0.4.1）**：以 `/p/<token>/...` 形式到达的 GET/HEAD 文档导航（`Sec-Fetch-Dest: document/iframe/frame`）不再直接在代理路径下伺服，而是 302 到目标自己的根相对路径。iframe 的 `location.pathname` 因此永远是目标路径、绝不是代理前缀——按 `location.pathname` 做路由的 SPA（opencode web UI、其它把 `/` 当唯一入口的 PWA）不再因解析出 `Unrecognised route!` 而崩溃。XHR/fetch 与子资源（`dest: empty` 等）和未携带 `Sec-Fetch-*` 的引擎保持旧的 prefix 直通行为（fail-open）。
+- 同源 302/3xx 重定向同样改写为根相对路径（原来是带前缀形式）；跨源重定向仍走 `/p/<token>/...` 显式形式，随后被同一条 bounce 规则落到新目标的根相对路径上。
 - 地址栏始终显示真实目标 URL，不显示代理 URL。
 
 ## 2026-08-22：开启 proxy 后页面闪烁（pi-web / Next.js）
@@ -72,6 +74,35 @@ iframe 的真实地址是代理路径 `/p/<token>/http/localhost:30141/`，不�
 iframe 第一次仍落在 `/p/<token>/http/host/`。Next 看到 pathname 对不上路由，会再导航到 `/`（一次）。之后 RSC 头齐全，停在 `/`，不再循环。
 
 这是 **path-prefix 代理的固有限制**，不是 infinte loop。要零次额外导航，得让 iframe 的 pathname 就是 `/`（例如每目标一个端口、或按 Host 分流），成本更高，目前不做。
+
+> **2026-10-29 更新**：上面的「固有限制」已用第三种方式解决——文档导航 bounce（见「URL 形态」）。浏览器在 302 这一跳之后落在根相对路径上，`location.pathname` 就是目标路径，SPA 不再需要任何客户端补救导航；当时的「每目标一个端口 / 按 Host 分流」两个选项都没有采用。
+
+## 2026-10-29：pathname 路由 SPA 崩溃（opencode web UI，TypeError reading 'type'）
+
+### 现象
+
+proxy 模式访问 `opencode serve`（v2.2.0，`localhost:4096`）：整页错误报告
+
+```text
+TypeError: Cannot read properties of undefined (reading 'type')
+    at Object.current (…/_assets/current-DyM6QvW-.js:6:44234)
+```
+
+### 根因（bundle 实测，非推测）
+
+opencode 的 web UI 是把 `/` 当唯一入口的 SPA：路由解析器只认 `pathname` 为 `/`、`/settings`、`/connect`、`/components`、`/new-session`、`/server/:key/session/:id`，其余一律 `throw Error('Unrecognised route!')`。代理路径 `/p/<token>/http/localhost:4096/` 五段全不匹配 → 路由 memo 保持 `undefined` → 下游 `current` computed 读 `e.type` 抛 TypeError，行:列 `6:44234` 正落在 `return e.type===` 的属性读取上。
+
+**独立复现**（不经过本扩展）：opencode 对任意未知路径都回退同一份 SPA，所以直接在浏览器开 `http://127.0.0.1:4097/p/abc123/http/localhost:4097/` 即得到一字不差的同一崩溃——证明崩因是 pathname 本身，与代理的其余行为无关。已排除：Set-Cookie/Cookie 丢弃（opencode web UI 不用 cookie，认证走 URL `auth_token` 参数）、压缩处理、shim 注入。
+
+### 修复
+
+文档导航 bounce（见「URL 形态」）：302 落到根相对路径，`location.pathname === '/'`，路由解析 `{type:'home'}`，正常渲染。已用真实 `FrameProxy` + 真实浏览器验证：密码登录、会话列表、打开会话、消息渲染全部正常，console 无错误。
+
+### 边界
+
+- POST/PUT 文档导航（表单直接 POST 到带前缀的绝对 URL）不 bounce（避免 307/308 语义陷阱），仍是 prefix 直通——这类 SPA 场景罕见，pathname 仍带前缀。
+- 不发 `Sec-Fetch-*` 的客户端 fail-open 回旧行为（VS Code webview 的 Chromium 一定发送）。
+- 302 这一跳是服务端重定向，浏览器跟随后才渲染，不存在旧方案「先渲染错路径再客户端补救」的白屏/闪烁。
 
 ## 其它已知边界
 

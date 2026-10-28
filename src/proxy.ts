@@ -13,6 +13,11 @@ import * as zlib from 'zlib';
  * - Forwards request headers (not a tiny allow-list). SPAs (Next.js RSC, Vite,
  *   etc.) send custom headers; dropping them makes the client treat the response
  *   as a full document and reload-loop. See docs/PROXY.md.
+ * - Document navigations arriving in the /p/<token>/... form are bounced (302)
+ *   to the target's own root-relative path, so the embedded page's
+ *   location.pathname is always the target path, never the proxy prefix
+ *   (path-prefix pathname breaks SPAs that route on pathname — e.g. opencode's
+ *   web UI throws "Unrecognised route!" and dies with a TypeError).
  * - No <base> / path rewriting (those caused SPA redirect loops). For text/html
  *   only, may buffer and inject a tiny external shim script tag so window.open /
  *   target=_blank and clipboard fallback can reach the parent webview.
@@ -57,6 +62,14 @@ const DROP_REQUEST_HEADERS = new Set([
 	'cookie',
 	'host',
 ]);
+
+/**
+ * Sec-Fetch-Dest values that identify a document navigation (top-level, iframe,
+ * legacy frame). Only these get the root-relative bounce below — XHR/fetch and
+ * subresource loads (dest: empty/font/...) must keep the old passthrough, and
+ * engines that don't send Sec-Fetch-* fail open to the old behavior too.
+ */
+const DOCUMENT_DESTS = new Set(['document', 'iframe', 'frame']);
 
 /**
  * Content encodings the proxy offers upstream. HTML responses may be buffered
@@ -384,14 +397,25 @@ export class FrameProxy {
 		if (status >= 300 && status < 400 && outHeaders.location) {
 			try {
 				const locUrl = new URL(String(outHeaders.location), target.url);
-				outHeaders.location =
-					this.baseUrl +
-					locUrl.protocol.slice(0, -1) +
-					'/' +
-					locUrl.host +
-					(locUrl.pathname || '/') +
-					(locUrl.search || '') +
-					(locUrl.hash || '');
+				if (locUrl.origin === target.url.origin) {
+					// Same-origin redirect: rewrite to the root-relative path so the
+					// page stays at location.pathname == target path (never the proxy
+					// prefix). The browser keeps the original #fragment when the
+					// Location carries none.
+					outHeaders.location = (locUrl.pathname || '/') + locUrl.search + (locUrl.hash || '');
+				} else {
+					// Cross-origin redirect: route through the explicit-target form;
+					// the document bounce in _handle then lands it at the new origin's
+					// own root-relative path, so pathname-routing SPAs survive there too.
+					outHeaders.location =
+						this.baseUrl +
+						locUrl.protocol.slice(0, -1) +
+						'/' +
+						locUrl.host +
+						(locUrl.pathname || '/') +
+						(locUrl.search || '') +
+						(locUrl.hash || '');
+				}
 			} catch {
 				delete outHeaders.location;
 			}
@@ -537,6 +561,26 @@ export class FrameProxy {
 		if (!target) {
 			res.writeHead(404);
 			res.end('Not Found');
+			return;
+		}
+
+		// Root-relative bounce for document navigations (see file header): a
+		// /p/<token>/... GET/HEAD navigation is answered with a redirect to the
+		// target's own path, so the iframe ends up at location.pathname == target
+		// path and pathname-routing SPAs work. The redirect is cheap (no page
+		// render between hops) and the fragment is carried over by the browser
+		// when the Location has none. Root-relative requests never enter this
+		// branch (_parseTarget is null for them), so it cannot loop.
+		if (
+			(req.method === 'GET' || req.method === 'HEAD') &&
+			this._parseTarget(reqUrl) !== null &&
+			DOCUMENT_DESTS.has(String(req.headers['sec-fetch-dest'] || ''))
+		) {
+			res.writeHead(302, {
+				location: target.url.pathname + target.url.search + target.url.hash,
+				'cache-control': 'no-store',
+			});
+			res.end();
 			return;
 		}
 

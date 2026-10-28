@@ -127,4 +127,87 @@ The Clipboard API has been blocked because of a permissions policy...
 | `src/webview/styles.css` | 重連區塊置底樣式 |
 | `src/proxy.ts` | HTML 注入 shim；`/__bp_shim.js` |
 | `src/browserView.ts` | `copyText` → `vscode.env.clipboard.writeText` |
-| `docs/PROXY.md` / `README.md` | shim 與限制說明 |
+
+---
+
+# [已完成] opencode web UI 崩潰與直連模式 popup 被擋 (2026-10-29)
+
+> **狀態標記**：[已完成]
+> **時間**：2026-10-29
+> **說明**：問題一已修復（v0.4.1，`src/proxy.ts` 文件導航 bounce）並以真實瀏覽器 + 真實 `FrameProxy` 端到端驗證；問題二經查證為 VS Code webview sandbox 固有限制，直連模式不可修，與本檔「已修 vs 未修」表一致。
+
+## 定案摘要
+
+| # | 議題 | 定案 |
+|---|------|------|
+| 1 | proxy 模式下 opencode（v2.2.0）整頁 `TypeError: Cannot read properties of undefined (reading 'type')` | **已修**：文檔導航 bounce——以 `/p/<token>/...` 形式到達的 GET/HEAD 文檔導航（`Sec-Fetch-Dest: document/iframe/frame`）302 到目標自己的根相對路徑，讓 iframe 的 `location.pathname` 永遠是目標路徑、不是代理前綴 |
+| 2 | 直連模式點外部連結被擋（`allow-popups` not set） | **不可修（直連）**：VS Code webview 外層 sandboxed iframe 未開 `allow-popups`，sandbox 旗標被巢狀 iframe 繼承且子層只能加嚴、extension 無法放寬。出路 = proxy shim 攔截（修好問題一即生效）或選單「在外部瀏覽器開啟」 |
+
+## 問題一：opencode web UI 經 proxy 開啟即 TypeError
+
+### 1. 現象
+
+`OPENCODE_PASSWORD=" " opencode serve --hostname 0.0.0.0`（port 4096），proxy 模式連入後整頁錯誤報告：
+
+```text
+TypeError: Cannot read properties of undefined (reading 'type')
+    at Object.current (…/_assets/current-DyM6QvW-.js:6:44234)
+    at Object.fn (…/_assets/solid-Cy8xcLB5.js:1:40792)
+    …
+```
+
+### 2. 根因（bundle 反推 + 真實瀏覽器 1:1 重現，非推測）
+
+opencode web UI 是把 `/` 當唯一入口的 SPA：路由解析器（`current-DyM6QvW-.js` 內 `Aa`）只認 `pathname` 為 `/`、`/settings`、`/connect`、`/components`、`/new-session`、`/server/:key/session/:id`，其餘一律 `throw Error('Unrecognised route!')`。代理路徑 `/p/<token>/http/localhost:4096/` 全部落空 → 路由 memo 維持 `undefined` → 下游 `current` computed 讀 `e.type` 拋 TypeError；堆疊 `6:44234` 欄位正落在 `return e.type===` 的屬性讀取上。
+
+**獨立重現**（不經本擴展）：opencode 對任意未知路徑回退同一份 SPA，直接在瀏覽器開 `http://127.0.0.1:4097/p/abc123/http/localhost:4097/` 即得一字不差的同一崩潰——證明崩因是 pathname 本身。
+
+**已排除**：Set-Cookie/Cookie 丟棄（opencode web UI 完全不用 cookie，認證走 URL `auth_token` 參數）、壓縮處理（br/gzip 透傳正確）、shim 注入破壞 HTML。
+
+### 3. 實作（v0.4.1）
+
+1. `src/proxy.ts` `_handle`：prefix 形式 + GET/HEAD + `Sec-Fetch-Dest ∈ {document, iframe, frame}` → 302 `Location: <目標路徑+query>`，附 `cache-control: no-store`。根相對請求不進此分支（`_parseTarget` 為 null），不可能循環。
+2. `src/proxy.ts` `_copyResponseHeaders`：同源 3xx 重定向改寫為根相對路徑（原為帶前綴形式）；跨源重定向保留顯式 `/p/<token>/...` 形式，隨後被同一條 bounce 落到新目標的根相對路徑。
+3. webview／host **零改動**：位址列讀的是 iframe `src` 屬性（始終是我們設定的 bootstrap URL），`fromProxyUrl` 行為不變。
+
+### 4. 驗證
+
+- 代理層 9 項斷言全過：bounce 保留目標路徑與 query、無循環、shim 注入、br/gzip 透傳、同源/跨源重定向改寫、`dest=empty` 與無 Sec-Fetch 引擎 fail-open 回舊行為、錯誤 Host 仍 403。
+- 修復後的真實 `FrameProxy` + 真實瀏覽器完整走過使用者場景：302 → `/` 正常渲染 → 密碼登入成功 → 會話列表 → 開啟實際會話（訊息/模型/計費全渲染），console 零錯誤。
+
+### 5. 邊界
+
+- POST/PUT 文檔導航（表單直接 POST 到帶前綴的絕對 URL）不 bounce（避開 307/308 語義陷阱），維持 prefix 直通，pathname 仍帶前綴——此場景罕見。
+- 不發 `Sec-Fetch-*` 的客戶端 fail-open 回舊行為（VS Code webview 的 Chromium 一定發送）。
+- 302 是服務端重定向，瀏覽器跟隨後才渲染，無舊方案「先渲染錯路徑再客戶端補救」的白屏；`#fragment` 在 Location 無 fragment 時由瀏覽器沿用原 URL 的。
+- 既有性質（非本次引入）：proxy port 每次啟動隨機 → opencode 存在 localStorage 的配對 token 隨 origin 失效，每次重開 VS Code 需重新配對。
+
+## 問題二：直連模式外部連結被 sandbox 擋下
+
+### 1. 現象
+
+```text
+Blocked opening 'https://auth.openai.com/oauth/authorize?…' in a new window
+because the request was made in a sandboxed frame whose 'allow-popups'
+permission is not set.
+```
+
+### 2. 根因
+
+VS Code webview 內容住在外層 sandboxed iframe（無 `allow-popups`）；HTML 規範規定 sandbox 旗標被巢狀 iframe **繼承**，子層 `sandbox` 屬性只能再加嚴、不能放寬，extension 無法改動 VS Code 外層。故 iframe 內任何 `window.open`／`target=_blank` 必被 Chromium 擋下。本檔 2026-09-18 的「已修 vs 未修」表（OAuth popup 回流＝未修、頁內另開＝已修需 proxy）記載正確。
+
+### 3. 結論
+
+直連模式**不可修**。可行路徑：
+
+1. proxy 模式 + shim 攔截（`window.open` / `target=_blank` → `openExternal` → 系統瀏覽器）——問題一修復後即可用；opencode 的 OAuth callback 回 `localhost:1455`（opencode 自己的本地 callback 服務），在外部瀏覽器完成登入沒有問題。
+2. 直連模式的替代：工具列選單「在外部瀏覽器開啟」（既有功能）。
+
+## 影響檔案清單（2026-10-29）
+
+| 檔案 | 變更 |
+|------|------|
+| `src/proxy.ts` | 文檔導航 bounce（302 → 根相對）；同源重定向根相對改寫 |
+| `docs/PROXY.md` | bounce 機制、崩潰根因、撤銷「path-prefix 固有限制/目前不做」記載 |
+| `README.md` | proxy 設定說明與 popup 限制措辭更新 |
+| `CHANGELOG.md` / `package.json` | 0.4.1 |

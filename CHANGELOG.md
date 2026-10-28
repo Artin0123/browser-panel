@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.4.1] - 2026-10-29
+
+### Fixed
+
+- Proxy: **pathname-routing SPAs now work** (e.g. `opencode serve` v2.2.0, which crashed with `TypeError: Cannot read properties of undefined (reading 'type')` in `current-DyM6QvW-.js`): document navigations that arrive in the `/p/<token>/...` form are answered with a **302 to the target's own root-relative path**, so the embedded page's `location.pathname` is always the target path — never the proxy prefix. Gated on `Sec-Fetch-Dest: document/iframe/frame` + GET/HEAD; XHR/fetch, subresources and engines without Sec-Fetch headers keep the old prefix passthrough (fail-open). Same-origin upstream redirects are likewise rewritten root-relative; cross-origin ones keep the explicit-target form and land at the new origin's own path via the same bounce. Verified end-to-end against a real `opencode serve` (password login, session list, session view) and by a standalone SPA-fallback reproduction of the original crash
+- Docs: `docs/PROXY.md` documents the bounce, the crash root cause and the retired "one extra navigation" limitation; README proxy wording updated
+
 ## [0.4.0] - 2026-10-26
 
 ### Security
