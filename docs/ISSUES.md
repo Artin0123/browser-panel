@@ -142,6 +142,7 @@ The Clipboard API has been blocked because of a permissions policy...
 |---|------|------|
 | 1 | proxy 模式下 opencode（v2.2.0）整頁 `TypeError: Cannot read properties of undefined (reading 'type')` | **已修**：文檔導航 bounce——以 `/p/<token>/...` 形式到達的 GET/HEAD 文檔導航（`Sec-Fetch-Dest: document/iframe/frame`）302 到目標自己的根相對路徑，讓 iframe 的 `location.pathname` 永遠是目標路徑、不是代理前綴 |
 | 2 | 直連模式點外部連結被擋（`allow-popups` not set） | **不可修（直連）**：VS Code webview 外層 sandboxed iframe 未開 `allow-popups`，sandbox 旗標被巢狀 iframe 繼承且子層只能加嚴、extension 無法放寬。出路 = proxy shim 攔截（修好問題一即生效）或選單「在外部瀏覽器開啟」 |
+| 3 | proxy port 隨機 → localStorage（opencode 配對 token／主題）每次重開 VS Code 就清空 | **已修**：sticky port——綁定過的 port 記在 globalState 並在下次 start 重用；被佔用時自動 fallback 隨機 port |
 
 ## 問題一：opencode web UI 經 proxy 開啟即 TypeError
 
@@ -182,6 +183,34 @@ opencode web UI 是把 `/` 當唯一入口的 SPA：路由解析器（`current-D
 - 302 是服務端重定向，瀏覽器跟隨後才渲染，無舊方案「先渲染錯路徑再客戶端補救」的白屏；`#fragment` 在 Location 無 fragment 時由瀏覽器沿用原 URL 的。
 - 既有性質（非本次引入）：proxy port 每次啟動隨機 → opencode 存在 localStorage 的配對 token 隨 origin 失效，每次重開 VS Code 需重新配對。
 
+## 問題三：proxy port 隨機 → localStorage（配對 token／主題）每次重來
+
+### 1. 現象
+
+proxy 每次啟動 `listen(0)` 隨機綁 port；proxy origin（`http://127.0.0.1:<port>`）跟著變，iframe 內網站的 localStorage／IndexedDB 是 per-origin 的——重開 VS Code 後 opencode 的配對 token、主題等全部清空，需重新配對。
+
+### 2. 根因
+
+Origin 含隨機 port；沒有任何機制讓 port 在重啟後重用。
+
+### 3. 實作（v0.4.1）
+
+1. `FrameProxy.start(preferredPort)`：優先綁偏好 port；綁定失敗（EADDRINUSE——其他進程搶走、或第二個 VS Code 視窗的 proxy 已佔用）自動 fallback 回隨機 port，不再讓 listen error 直接 reject。
+2. `get port()` 暴露實際綁定 port；`extension.ts` 在 start 成功後寫入 `globalState('browser.proxyPort')`，下次 start 讀回。fallback 後存的是新隨機 port（自然成為下次的 sticky port）。
+3. 安全性不變：Host header 檢查（防 DNS rebinding）與 token（顯式目標形式）維持；root 相對請求本來就不帶 token，port 可預測只是讓「借用 proxy 存取當前目標」的既有暴露更容易被找到，實際可做的事不變（無憑證流經 proxy）。
+
+### 4. 驗證
+
+- 隨機啟動 → dispose → 以同一 port 重啟：重綁成功（同 port）。
+- 第二個實體偏好已被佔用的 port：自動 fallback 到不同 port。
+- POST body 經真實 proxy 位元組級完整轉發；SSE（`text/event-stream`）增量串流無緩衝（chunk 間隔 ~300ms 如期到達）。
+
+### 5. opencode 場景其餘確認事項（2026-10-29 盤點）
+
+- **配對連結**：`/auth/connect/<key>` 由伺服器端處理（回 JSON／重定向，非 SPA fallback），從面板位址列導航不會踩到路由崩潰；建議流程＝讓「伺服器 URL」保持預填的 proxy 位址 + 密碼登入（已實測）。
+- **Reload 深層路由**：bounce 後重載 `lastUrl`（如 `/server/x/session/y`）會直接落在正確路由，比舊設計更好。
+- **既有未修項**（iframe／webview 平台限制，見上方表格）：frame-busting、下載、跨來源位址列、`alert/confirm/prompt` 等，與 opencode 無衝突；opencode 不用 Service Worker、不用 cookie，均不受影響。
+
 ## 問題二：直連模式外部連結被 sandbox 擋下
 
 ### 1. 現象
@@ -207,7 +236,8 @@ VS Code webview 內容住在外層 sandboxed iframe（無 `allow-popups`）；HT
 
 | 檔案 | 變更 |
 |------|------|
-| `src/proxy.ts` | 文檔導航 bounce（302 → 根相對）；同源重定向根相對改寫 |
-| `docs/PROXY.md` | bounce 機制、崩潰根因、撤銷「path-prefix 固有限制/目前不做」記載 |
+| `src/proxy.ts` | 文檔導航 bounce（302 → 根相對）；同源重定向根相對改寫；sticky port（`start(preferredPort)` + `port` getter + 綁定失敗 fallback） |
+| `src/extension.ts` | proxy port 記入／讀回 `globalState('browser.proxyPort')` |
+| `docs/PROXY.md` | bounce 機制、崩潰根因、sticky port、撤銷「path-prefix 固有限制/目前不做」記載 |
 | `README.md` | proxy 設定說明與 popup 限制措辭更新 |
 | `CHANGELOG.md` / `package.json` | 0.4.1 |

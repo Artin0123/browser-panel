@@ -108,6 +108,11 @@ export class FrameProxy {
 		return `http://127.0.0.1:${this._port}/p/${this._token}/`;
 	}
 
+	/** Bound port (0 until started). The host persists it to keep the origin stable. */
+	get port(): number {
+		return this._port;
+	}
+
 	get listening(): boolean {
 		return !!this._server;
 	}
@@ -116,20 +121,47 @@ export class FrameProxy {
 		return '/p/' + this._token + '/__bp_shim.js';
 	}
 
-	async start(): Promise<void> {
+	/**
+	 * Start the proxy, preferring a previously bound port when given. A stable
+	 * port keeps the proxy origin (and with it the embedded pages' localStorage —
+	 * e.g. opencode's pairing token and theme) stable across extension-host
+	 * restarts. If the preferred port is taken (another process grabbed it, or a
+	 * second VS Code window's proxy is already there), fall back to a random one.
+	 */
+	async start(preferredPort = 0): Promise<void> {
 		// Never leak a previous server (e.g. if start() is called twice in a row).
 		if (this._server) {
 			await this.dispose();
 		}
-		return new Promise((resolve, reject) => {
+		if (preferredPort > 0 && (await this._tryStart(preferredPort))) {
+			return;
+		}
+		await this._tryStart(0);
+	}
+
+	/** Bind once; resolves false on bind errors (port taken, no permission, …). */
+	private _tryStart(port: number): Promise<boolean> {
+		return new Promise((resolve) => {
 			const server = http.createServer((req, res) => this._handle(req, res));
 			// Forward WebSocket upgrades (dev-server HMR etc.) to the target.
 			server.on('upgrade', (req, socket, head) => this._handleUpgrade(req, socket, head));
-			server.on('error', reject);
-			server.listen(0, '127.0.0.1', () => {
+			let settled = false;
+			server.on('error', () => {
+				// Post-listen errors must not escape as unhandled ('error' has no
+				// other listener once resolved); bind errors resolve false.
+				if (!settled) {
+					settled = true;
+					server.close();
+					resolve(false);
+				}
+			});
+			server.listen(port, '127.0.0.1', () => {
 				this._port = (server.address() as { port: number }).port;
 				this._server = server;
-				resolve();
+				if (!settled) {
+					settled = true;
+					resolve(true);
+				}
 			});
 		});
 	}

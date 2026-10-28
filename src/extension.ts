@@ -6,7 +6,12 @@ import { FrameProxy } from './proxy';
 export function activate(context: vscode.ExtensionContext): void {
 	// Local proxy that strips frame-blocking headers (lazy: only runs while enabled).
 	// Cert acceptance is read per request so the setting applies without a restart.
+	// The bound port is remembered in globalState and re-used on the next start so
+	// the proxy origin (and the embedded pages' localStorage — e.g. opencode's
+	// pairing token) stays stable across editor restarts; a taken port falls back
+	// to a random one (second VS Code window, port grabbed meanwhile).
 	const proxy = new FrameProxy(() => getConfig().acceptSelfSignedCerts);
+	const PROXY_PORT_KEY = 'browser.proxyPort';
 	context.subscriptions.push({ dispose: () => void proxy.dispose() });
 
 	// Register the browser webview view (bottom panel container, draggable to secondary sidebar).
@@ -38,7 +43,7 @@ export function activate(context: vscode.ExtensionContext): void {
 			const enabled = getConfig().proxyEnabled;
 			const op =
 				enabled && !proxy.listening
-					? proxy.start()
+					? proxy.start(context.globalState.get<number>(PROXY_PORT_KEY, 0))
 					: !enabled && proxy.listening
 						? proxy.dispose()
 						: undefined;
@@ -58,6 +63,12 @@ export function activate(context: vscode.ExtensionContext): void {
 				} finally {
 					clearTimeout(timer);
 				}
+			}
+			// Persist whatever port actually got bound (preferred or fallback) so the
+			// next start re-uses it. Only after a settled successful start: a hung
+			// start must not clobber the remembered port.
+			if (enabled && proxy.listening && proxy.port > 0) {
+				await context.globalState.update(PROXY_PORT_KEY, proxy.port);
 			}
 		} catch (err) {
 			void vscode.window.showWarningMessage(

@@ -44,7 +44,7 @@ Embedded browser for the VS Code **bottom panel / secondary sidebar** — defaul
 | Setting | Default | Description |
 |---------|---------|-------------|
 | `browser.historyLimit` | `200` | Maximum history entries to keep (oldest removed first, clamped to 1–10000). |
-| `browser.proxyEnabled` | `false` | Route pages through a local proxy that strips frame-blocking headers (`X-Frame-Options` / CSP `frame-ancestors`). Same proxy for any localhost/http(s) site — not Next.js-specific. Best-effort: logins and JS-hardcoded https URLs may not work. Document navigations are bounced to the target's own root-relative path, so `location.pathname`-routing SPAs (opencode web UI, …) see their real path, never the proxy prefix. |
+| `browser.proxyEnabled` | `false` | Route pages through a local proxy that strips frame-blocking headers (`X-Frame-Options` / CSP `frame-ancestors`). Same proxy for any localhost/http(s) site — not Next.js-specific. Best-effort: logins and JS-hardcoded https URLs may not work. Document navigations are bounced to the target's own root-relative path, so `location.pathname`-routing SPAs (opencode web UI, …) see their real path, never the proxy prefix. The proxy port is sticky (remembered and re-used; falls back to a random port when taken), so the proxy origin — and embedded pages' localStorage, e.g. opencode's pairing token — survives editor restarts. |
 | `browser.acceptSelfSignedCerts` | `true` | Accept self-signed certificates when loading pages (proxy mode) and during the reachability probe. Keep on for local https dev servers; turn off to enforce certificate validation everywhere (self-signed hosts then show as unreachable). |
 
 ## Known limitations

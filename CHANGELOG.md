@@ -5,7 +5,8 @@
 ### Fixed
 
 - Proxy: **pathname-routing SPAs now work** (e.g. `opencode serve` v2.2.0, which crashed with `TypeError: Cannot read properties of undefined (reading 'type')` in `current-DyM6QvW-.js`): document navigations that arrive in the `/p/<token>/...` form are answered with a **302 to the target's own root-relative path**, so the embedded page's `location.pathname` is always the target path — never the proxy prefix. Gated on `Sec-Fetch-Dest: document/iframe/frame` + GET/HEAD; XHR/fetch, subresources and engines without Sec-Fetch headers keep the old prefix passthrough (fail-open). Same-origin upstream redirects are likewise rewritten root-relative; cross-origin ones keep the explicit-target form and land at the new origin's own path via the same bounce. Verified end-to-end against a real `opencode serve` (password login, session list, session view) and by a standalone SPA-fallback reproduction of the original crash
-- Docs: `docs/PROXY.md` documents the bounce, the crash root cause and the retired "one extra navigation" limitation; README proxy wording updated
+- Proxy: **sticky port** — the bound port is remembered in `globalState` and re-used on the next start (auto-fallback to a random port when it is taken: second VS Code window, port grabbed by another process). The proxy origin — and with it the embedded pages' localStorage (opencode pairing token, theme) — now survives editor restarts instead of forcing a fresh pairing every time. POST bodies and SSE streams verified byte-/timing-intact through the proxy
+- Docs: `docs/ISSUES.md` (2026-10-29 section: crash root cause, popup sandbox verdict, sticky port), `docs/PROXY.md` (bounce, sticky port, retired "one extra navigation" limitation), README proxy wording updated
 
 ## [0.4.0] - 2026-10-26
 

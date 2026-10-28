@@ -32,6 +32,7 @@ http://127.0.0.1:<port>/p/<token>/<scheme>/<host>/<path>
 - 根相对路径（`/_next/static/...`、`/api/...`）落到代理根上，按「上一次解析到的目标」转发；目标 origin 由代理侧拼接锁定，请求路径不能改写目标（`//host`、绝对形式、反斜线等请求目标会被拒绝）。
 - **文档导航 bounce（v0.4.1）**：以 `/p/<token>/...` 形式到达的 GET/HEAD 文档导航（`Sec-Fetch-Dest: document/iframe/frame`）不再直接在代理路径下伺服，而是 302 到目标自己的根相对路径。iframe 的 `location.pathname` 因此永远是目标路径、绝不是代理前缀——按 `location.pathname` 做路由的 SPA（opencode web UI、其它把 `/` 当唯一入口的 PWA）不再因解析出 `Unrecognised route!` 而崩溃。XHR/fetch 与子资源（`dest: empty` 等）和未携带 `Sec-Fetch-*` 的引擎保持旧的 prefix 直通行为（fail-open）。
 - 同源 302/3xx 重定向同样改写为根相对路径（原来是带前缀形式）；跨源重定向仍走 `/p/<token>/...` 显式形式，随后被同一条 bounce 规则落到新目标的根相对路径上。
+- **Sticky port（v0.4.1）**：綁定過的 port 記在 globalState，下次 start 優先重用（被其他進程佔用或第二個 VS Code 視窗時自動 fallback 到隨機 port）。port 穩定 → proxy origin 穩定 → 內嵌頁的 localStorage（opencode 的配對 token、主題設定）跨重啟保存，不必每次重新配對。
 - 地址栏始终显示真实目标 URL，不显示代理 URL。
 
 ## 2026-08-22：开启 proxy 后页面闪烁（pi-web / Next.js）
