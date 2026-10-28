@@ -45,6 +45,8 @@ interface HistoryPickItem extends vscode.QuickPickItem {
 const HISTORY_KEY = 'browser.history';
 const LAST_URL_KEY = 'browser.lastUrl';
 const CLOSED_KEY = 'browser.closed';
+// Keep in sync with package.json — used for webview resource cache-busting.
+const EXTENSION_VERSION = '0.4.1';
 
 export class BrowserViewProvider implements vscode.WebviewViewProvider {
 	public static readonly viewType = 'browser.view';
@@ -52,6 +54,9 @@ export class BrowserViewProvider implements vscode.WebviewViewProvider {
 	private _view?: vscode.WebviewView;
 	// Listeners tied to the current webview view instance (disposed on re-resolve/dispose).
 	private _viewDisposables: vscode.Disposable[] = [];
+	// Set by any inbound webview message; the startup watchdog treats "no message
+	// since resolve" as a stuck webview (see resolveWebviewView).
+	private _webviewAlive = false;
 
 	constructor(private readonly _context: vscode.ExtensionContext, private readonly _proxy: FrameProxy) {}
 
@@ -80,11 +85,46 @@ export class BrowserViewProvider implements vscode.WebviewViewProvider {
 			// _handleMessage is async: catch rejections (clipboard, commands, ...) so a
 			// failure can never surface as an unhandled rejection in the extension host.
 			webviewView.webview.onDidReceiveMessage((msg: WebviewMessage) => {
+				this._webviewAlive = true;
 				this._handleMessage(msg).catch((err) => {
 					console.error('[browser-panel] failed to handle webview message:', err);
 				});
 			})
 		);
+		this._armStartupWatchdog(webviewView);
+	}
+
+	/**
+	 * Startup watchdog against the intermittent blank panel: the webview's initial
+	 * DOM is a blank viewport, and only a completed config exchange navigates it.
+	 * If the webview's script never ran (VS Code webview load flake), its own
+	 * getConfig retry can't help either — nothing will ever arrive. So after 10 s
+	 * of webview silence, re-assign webview.html to force the document (and its
+	 * script) to reload; capped at two attempts. Any inbound message marks the
+	 * webview alive and disarms the timer. (A lost getConfig/reply is covered
+	 * faster and invisibly by the webview's own retry — this layer is only for a
+	 * webview that is not running at all.)
+	 */
+	private _armStartupWatchdog(webviewView: vscode.WebviewView): void {
+		this._webviewAlive = false;
+		let reloads = 0;
+		const arm = (): void => {
+			const timer = setTimeout(() => {
+				if (this._view !== webviewView || this._webviewAlive) {
+					return; // view replaced/disposed, or the webview is talking to us
+				}
+				if (reloads >= 2) {
+					console.warn('[browser-panel] webview still silent after 2 forced reloads — giving up');
+					return;
+				}
+				reloads++;
+				console.warn('[browser-panel] webview silent since resolve — forcing a webview reload (attempt ' + reloads + ')');
+				webviewView.webview.html = this._getHtml(webviewView.webview);
+				arm(); // re-check: a reloaded webview that talks disarms, a dead one gets one more
+			}, 10000);
+			this._viewDisposables.push({ dispose: () => clearTimeout(timer) });
+		};
+		arm();
 	}
 
 	/** Push current settings to the webview (used on config change). */
@@ -102,8 +142,12 @@ export class BrowserViewProvider implements vscode.WebviewViewProvider {
 	private _getHtml(webview: vscode.Webview): string {
 		try {
 			const webviewDir = vscode.Uri.joinPath(this._context.extensionUri, 'dist', 'webview');
-			const scriptUri = webview.asWebviewUri(vscode.Uri.joinPath(webviewDir, 'app.js'));
-			const styleUri = webview.asWebviewUri(vscode.Uri.joinPath(webviewDir, 'styles.css'));
+			// Version query busts the webview's resource cache: without it an
+			// extension update could keep serving the previous app.js/index.html
+			// (stale script + fresh host contract = broken/blank panel).
+			const v = '?v=' + EXTENSION_VERSION;
+			const scriptUri = webview.asWebviewUri(vscode.Uri.joinPath(webviewDir, 'app.js')).toString() + v;
+			const styleUri = webview.asWebviewUri(vscode.Uri.joinPath(webviewDir, 'styles.css')).toString() + v;
 
 			const htmlPath = path.join(this._context.extensionPath, 'dist', 'webview', 'index.html');
 			let html = fs.readFileSync(htmlPath, 'utf8');

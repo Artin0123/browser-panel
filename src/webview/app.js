@@ -54,6 +54,7 @@ import { svgIcon } from './icons.js';
 			deviceWidth: 'Width', deviceHeight: 'Height', deviceApply: 'Apply',
 			emptyTitle: 'Browser closed', emptyReopen: 'Reopen',
 			errorTitle: 'Cannot connect',
+			invalidUrl: 'Invalid URL',
 			embedTitle: 'Site cannot be embedded', embedDetail: 'The site blocks embedding (X-Frame-Options / CSP frame-ancestors). Use "Open in external browser" or enable the browser.proxyEnabled setting.',
 			proxyAuthNote: 'The URL contains credentials (user:pass) that the proxy cannot forward; the site is loaded directly instead.',
 			reconnectIn: 'Retrying in {n}s\u2026',
@@ -71,6 +72,7 @@ import { svgIcon } from './icons.js';
 			deviceWidth: '宽度', deviceHeight: '高度', deviceApply: '应用',
 			emptyTitle: '浏览器已关闭', emptyReopen: '重新打开',
 			errorTitle: '无法连接',
+			invalidUrl: '无效网址',
 			embedTitle: '网站无法内嵌', embedDetail: '该网站禁止内嵌（X-Frame-Options / CSP frame-ancestors）。请使用「在外部浏览器中打开」，或开启 browser.proxyEnabled 设置。',
 			proxyAuthNote: '网址包含认证信息（user:pass），Proxy 无法转发，已改为直接连接加载。',
 			reconnectIn: '{n} 秒后自动重试\u2026',
@@ -88,6 +90,7 @@ import { svgIcon } from './icons.js';
 			deviceWidth: '寬度', deviceHeight: '高度', deviceApply: '套用',
 			emptyTitle: '瀏覽器已關閉', emptyReopen: '重新開啟',
 			errorTitle: '無法連線',
+			invalidUrl: '無效網址',
 			embedTitle: '網站無法內嵌', embedDetail: '該網站禁止內嵌（X-Frame-Options / CSP frame-ancestors）。請使用「在外部瀏覽器開啟」，或開啟 browser.proxyEnabled 設定。',
 			proxyAuthNote: '網址包含認證資訊（user:pass），Proxy 無法轉發，已改為直接連線載入。',
 			reconnectIn: '{n} 秒後自動重試\u2026',
@@ -313,6 +316,7 @@ import { svgIcon } from './icons.js';
 	let reconnectCountdownTimer = null;
 	let reconnectArmed = false; // auto-retry scheduled (not cancelled)
 	let reconnectAttemptPending = false; // a background retry navigation is in flight
+	let configReceived = false; // startup config exchange completed
 
 	function stopLoading() {
 		btnReload.classList.remove('loading');
@@ -421,6 +425,7 @@ import { svgIcon } from './icons.js';
 		errorDetailEl.textContent = u + ' \u2014 ' + (blocked ? S.embedDetail : detail);
 		errorState.hidden = false;
 		viewportWrap.hidden = true;
+		btnErrorExternal.hidden = false; // visible again for URL-backed errors
 		// Auto-reconnect only for reachability failures (not frame-blocked sites).
 		if (!blocked) {
 			startReconnect(u);
@@ -464,7 +469,9 @@ import { svgIcon } from './icons.js';
 	function navigate(url, { record = true } = {}) {
 		const u = normalizeUrl(url);
 		if (!u) {
-			return;
+			// Callers that must react to a failure (startup config) check the return;
+			// toolbar paths ignore it (the URL bar already holds what the user typed).
+			return false;
 		}
 		if (nav.current && nav.current !== u) {
 			nav.back.push(nav.current);
@@ -476,6 +483,7 @@ import { svgIcon } from './icons.js';
 			lastUrl = u;
 			vscode.postMessage({ type: 'navigate', url: u });
 		}
+		return true;
 	}
 
 	function goBack() {
@@ -931,6 +939,7 @@ import { svgIcon } from './icons.js';
 			}
 		}
 		if (msg.type === 'config') {
+			configReceived = true;
 			config = Object.assign({}, config, msg.config);
 			proxy = { enabled: !!msg.proxy?.enabled, baseUrl: msg.proxy?.baseUrl || '' };
 			S = pickStrings(msg.language);
@@ -944,8 +953,16 @@ import { svgIcon } from './icons.js';
 				emptyState.hidden = false;
 				urlInput.value = lastUrl || config.defaultUrl;
 				updateButtons();
-			} else {
-				navigate(lastUrl || config.defaultUrl);
+			} else if (!navigate(lastUrl || config.defaultUrl)) {
+				// Neither the stored nor the default URL is usable. Leaving the
+				// initial DOM as-is would be a silent blank frame (no error page,
+				// no reconnect — nothing ever starts); surface the raw value instead.
+				errorUrl = '';
+				errorTitleEl.textContent = S.invalidUrl;
+				errorDetailEl.textContent = String(lastUrl || config.defaultUrl || '');
+				errorState.hidden = false;
+				viewportWrap.hidden = true;
+				btnErrorExternal.hidden = true;
 			}
 		} else if (msg.type === 'configChanged') {
 			const prevProxy = proxy;
@@ -1019,6 +1036,22 @@ import { svgIcon } from './icons.js';
 	injectIcons();
 	applyStrings();
 	vscode.postMessage({ type: 'getConfig' });
+
+	// Startup watchdog: the panel's initial DOM is a blank viewport (empty state
+	// and error state both hidden), and the ONLY way out of it is the config
+	// exchange — if the getConfig message or its reply is ever dropped (webview
+	// IPC race / extension host busy at startup), the panel stays blank forever
+	// with no error page and nothing to auto-retry. Re-request until the config
+	// arrives; the host-side watchdog is the second layer (forces a reload when
+	// even this script never ran).
+	let configRetries = 0;
+	const configWatchdog = setInterval(() => {
+		if (configReceived || ++configRetries >= 5) {
+			clearInterval(configWatchdog);
+			return;
+		}
+		vscode.postMessage({ type: 'getConfig' });
+	}, 1500);
 
 	// Live-update the device menu numbers while the panel is dragged/resized.
 	new ResizeObserver(() => {

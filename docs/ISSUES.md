@@ -143,6 +143,7 @@ The Clipboard API has been blocked because of a permissions policy...
 | 1 | proxy 模式下 opencode（v2.2.0）整頁 `TypeError: Cannot read properties of undefined (reading 'type')` | **已修**：文檔導航 bounce——以 `/p/<token>/...` 形式到達的 GET/HEAD 文檔導航（`Sec-Fetch-Dest: document/iframe/frame`）302 到目標自己的根相對路徑，讓 iframe 的 `location.pathname` 永遠是目標路徑、不是代理前綴 |
 | 2 | 直連模式點外部連結被擋（`allow-popups` not set） | **不可修（直連）**：VS Code webview 外層 sandboxed iframe 未開 `allow-popups`，sandbox 旗標被巢狀 iframe 繼承且子層只能加嚴、extension 無法放寬。出路 = proxy shim 攔截（修好問題一即生效）或選單「在外部瀏覽器開啟」 |
 | 3 | proxy port 隨機 → localStorage（opencode 配對 token／主題）每次重開 VS Code 就清空 | **已修**：sticky port——綁定過的 port 記在 globalState 並在下次 start 重用；被佔用時自動 fallback 隨機 port |
+| 4 | 偶發：第一次載入 VS Code 面板整個白畫面，無錯誤視窗、不會自動重試、無法穩定重現 | **已加防護**（無法在擴展端根治 VS Code webview 偶發載入失敗，但可自癒）：webview 端重試 `getConfig`（治訊息丟失）；host 端 10s 靜默後強制重載 webview（上限 2 次，治腳本沒跑起來）；無效 URL 改顯示錯誤頁而非靜默白框 |
 
 ## 問題一：opencode web UI 經 proxy 開啟即 TypeError
 
@@ -211,6 +212,42 @@ Origin 含隨機 port；沒有任何機制讓 port 在重啟後重用。
 - **Reload 深層路由**：bounce 後重載 `lastUrl`（如 `/server/x/session/y`）會直接落在正確路由，比舊設計更好。
 - **既有未修項**（iframe／webview 平台限制，見上方表格）：frame-busting、下載、跨來源位址列、`alert/confirm/prompt` 等，與 opencode 無衝突；opencode 不用 Service Worker、不用 cookie，均不受影響。
 
+## 問題四：偶發「第一次載入 VS Code 面板白畫面」（無法穩定重現）
+
+### 1. 現象
+
+有時 VS Code 啟動後面板整個白畫面：沒有「無法連線」錯誤視窗、自動重試沒啟動、什麼都不能用；無法穩定重現。
+
+### 2. 根因分析（代碼審查）
+
+關鍵事實：`index.html` 的初始 DOM 就是「白畫面狀態」——`viewport-wrap` 預設可見、iframe 無 `src`、`empty-state`／`error-state` 都隱藏。唯一能離開這個狀態的路徑是 webview 載入後送 `getConfig` → host 回 `config` → `navigate()` 啟動導航／probe／重連鏈。這條鏈任何一環斷掉，症狀與回報完全一致：
+
+| 斷點 | 情境 | 結果 |
+|------|------|------|
+| webview 腳本沒跑起來 | VS Code webview 偶發載入失敗（平台層 flake，已知問題類別） | 永久白畫面 |
+| `getConfig`（webview→host）丟失 | 啟動期 IPC race／extension host 忙碌 | host 永遠不會回 config → 永久白畫面 |
+| `config`（host→webview）丟失 | 同上（host 只在被動收到 getConfig 後才回） | webview 永遠收不到 → 永久白畫面 |
+| `navigate()` 靜默早退 | `lastUrl` 與 `defaultUrl` 都無法 normalize（如 `browser.defaultUrl` 被設成空字串） | 不啟動任何導航/probe → 白畫面，且 Go 鍵也靜默無動作 |
+
+設計上的結構性弱點：**啟動流程完全依賴單次、被動的訊息交換，沒有任何超時自救路徑**——正常時 <100ms 完成，但失敗時沒有第二機會。這解釋了「偶發且無法重現」：只在 IPC race／webview 載入 flake 恰好發生在面板首次 resolve 時出現。
+
+### 3. 實作（v0.4.1，自癒機制）
+
+1. **webview 端重試**（`app.js`）：`config` 收到前每 1.5s 重送 `getConfig`（最多 5 次；`configReceived` 旗標防重）——治「訊息偶發丟失」，快（1.5s）且無可見重載。
+2. **host 端看門狗**（`browserView.ts` `_armStartupWatchdog`）：resolve 後追蹤「是否收過任何 webview 訊息」；**10s 靜默 → 重新賦值 `webview.html` 強制重載 webview 文檔**（治腳本沒跑起來——此時 webview 自己的重試也不會執行）；上限 2 次。view dispose／被取代時定時器清理；任何入站訊息解除武裝。正常路徑（config <100ms 到達）永遠不觸發。
+   *設計取捨*：曾考慮 host 在靜默時「主動推送 config」作為中間層，審查後移除——它與 webview 重試修的是同一個斷點（回覆丟失），重試 1.5s 就已涵蓋，push 幾乎不會被需要；多一條代碼路徑只增加複雜度。看門狗只保留 webview 重試無法涵蓋的場景（腳本未執行）。
+3. **無效 URL 顯性化**（`app.js`）：`navigate()` 回傳布林；啟動導航失敗時顯示「無效網址」錯誤頁（i18n ×3），不再是靜默白框。
+4. **資源 URI 加版本參數**（`?v=<version>`，2 行）：防擴展更新後 webview 資源快取供應舊 `app.js`（舊腳本 + 新 host 契約 = 行為異常／白框的另一候選來源）。
+
+### 4. 驗證限制
+
+白畫面本身無法穩定重現（其成因就在無法重現裡），以上為代碼審查 + 針對每個斷點的機制性防護；typecheck/build 通過。若日後再出現白畫面，看門狗的 `console.warn` 會在 extension host 輸出留下痕跡（「webview silent since resolve」/「forcing a webview reload」），可據此確認命中哪一層。
+
+### 5. 邊界
+
+- 若是**整個視窗**（非僅面板）白畫面，屬 VS Code 本體問題，擴展端無從介入。
+- **強制重載發生在啟動後 10s 且僅限 webview 完全靜默時**；正常路徑（config <100ms 到達）永遠不會觸發。
+
 ## 問題二：直連模式外部連結被 sandbox 擋下
 
 ### 1. 現象
@@ -238,6 +275,8 @@ VS Code webview 內容住在外層 sandboxed iframe（無 `allow-popups`）；HT
 |------|------|
 | `src/proxy.ts` | 文檔導航 bounce（302 → 根相對）；同源重定向根相對改寫；sticky port（`start(preferredPort)` + `port` getter + 綁定失敗 fallback） |
 | `src/extension.ts` | proxy port 記入／讀回 `globalState('browser.proxyPort')` |
+| `src/browserView.ts` | 啟動看門狗（10s 靜默 → 強制重載 webview，上限 2 次）；資源 URI 版本參數防快取 |
+| `src/webview/app.js` | `getConfig` 重試；無效 URL 錯誤頁（i18n）；`navigate()` 回傳布林 |
 | `docs/PROXY.md` | bounce 機制、崩潰根因、sticky port、撤銷「path-prefix 固有限制/目前不做」記載 |
 | `README.md` | proxy 設定說明與 popup 限制措辭更新 |
 | `CHANGELOG.md` / `package.json` | 0.4.1 |
