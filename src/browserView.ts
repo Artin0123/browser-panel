@@ -46,7 +46,7 @@ const HISTORY_KEY = 'browser.history';
 const LAST_URL_KEY = 'browser.lastUrl';
 const CLOSED_KEY = 'browser.closed';
 // Keep in sync with package.json — used for webview resource cache-busting.
-const EXTENSION_VERSION = '0.4.1';
+const EXTENSION_VERSION = '0.4.2';
 
 export class BrowserViewProvider implements vscode.WebviewViewProvider {
 	public static readonly viewType = 'browser.view';

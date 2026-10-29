@@ -30,7 +30,8 @@ http://127.0.0.1:<port>/p/<token>/<scheme>/<host>/<path>
 
 - `token` 防止本机其它进程把它当开放代理；v0.4.0 起另验证 `Host` 头必须是代理自身地址（`127.0.0.1:<port>` / `localhost:<port>`），其余一律 403 / 断开，防 DNS rebinding 与借用代理。
 - 根相对路径（`/_next/static/...`、`/api/...`）落到代理根上，按「上一次解析到的目标」转发；目标 origin 由代理侧拼接锁定，请求路径不能改写目标（`//host`、绝对形式、反斜线等请求目标会被拒绝）。
-- **文档导航 bounce（v0.4.1）**：以 `/p/<token>/...` 形式到达的 GET/HEAD 文档导航（`Sec-Fetch-Dest: document/iframe/frame`）不再直接在代理路径下伺服，而是 302 到目标自己的根相对路径。iframe 的 `location.pathname` 因此永远是目标路径、绝不是代理前缀——按 `location.pathname` 做路由的 SPA（opencode web UI、其它把 `/` 当唯一入口的 PWA）不再因解析出 `Unrecognised route!` 而崩溃。XHR/fetch 与子资源（`dest: empty` 等）和未携带 `Sec-Fetch-*` 的引擎保持旧的 prefix 直通行为（fail-open）。
+- **文档导航 bounce（v0.4.1，閘門修正 v0.4.2）**：以 `/p/<token>/...` 形式到达的 GET/HEAD 文档导航不再直接在代理路径下伺服，而是 302 到目标自己的根相对路径。iframe 的 `location.pathname` 因此永远是目标路径、绝不是代理前缀——按 `location.pathname` 做路由的 SPA（opencode web UI、其它把 `/` 当唯一入口的 PWA）不再因解析出 `Unrecognised route!` 而崩溃。**不按 `Sec-Fetch-Dest` 閘門**（VS Code webview 的 iframe 文檔導航送 `dest=empty`，0.4.1 的閘門在真實環境永不命中，v0.4.2 移除；prefix 形式只來自 webview bootstrap 與跨源重定向改寫，本來就全是導航）。
+- **Service Worker 腳本一律 404（v0.4.2）**：proxy origin 為所有經代理網站共用（sticky port 下更持久），任一網站註冊的 SW 都會存續並攔截之後其他網站的請求（opencode 實測就會註冊）。`dest=serviceworker` 的請求回 404，`register()` 必然失敗；直連模式不受影響。
 - 同源 302/3xx 重定向同样改写为根相对路径（原来是带前缀形式）；跨源重定向仍走 `/p/<token>/...` 显式形式，随后被同一条 bounce 规则落到新目标的根相对路径上。
 - **Sticky port（v0.4.1）**：綁定過的 port 記在 globalState，下次 start 優先重用（被其他進程佔用或第二個 VS Code 視窗時自動 fallback 到隨機 port）。port 穩定 → proxy origin 穩定 → 內嵌頁的 localStorage（opencode 的配對 token、主題設定）跨重啟保存，不必每次重新配對。
 - 地址栏始终显示真实目标 URL，不显示代理 URL。

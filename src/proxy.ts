@@ -17,7 +17,10 @@ import * as zlib from 'zlib';
  *   to the target's own root-relative path, so the embedded page's
  *   location.pathname is always the target path, never the proxy prefix
  *   (path-prefix pathname breaks SPAs that route on pathname — e.g. opencode's
- *   web UI throws "Unrecognised route!" and dies with a TypeError).
+ *   web UI throws "Unrecognised route!" and dies with a TypeError). No
+ *   sec-fetch-dest gate: VS Code webviews send dest=empty for iframe docs.
+ * - Service worker scripts are refused (the shared proxy origin must never be
+ *   captured by one site's service worker).
  * - No <base> / path rewriting (those caused SPA redirect loops). For text/html
  *   only, may buffer and inject a tiny external shim script tag so window.open /
  *   target=_blank and clipboard fallback can reach the parent webview.
@@ -64,14 +67,6 @@ const DROP_REQUEST_HEADERS = new Set([
 ]);
 
 /**
- * Sec-Fetch-Dest values that identify a document navigation (top-level, iframe,
- * legacy frame). Only these get the root-relative bounce below — XHR/fetch and
- * subresource loads (dest: empty/font/...) must keep the old passthrough, and
- * engines that don't send Sec-Fetch-* fail open to the old behavior too.
- */
-const DOCUMENT_DESTS = new Set(['document', 'iframe', 'frame']);
-
-/**
  * Content encodings the proxy offers upstream. HTML responses may be buffered
  * and decompressed for shim injection, so only encodings _decompressBody can
  * decode are requested — anything else (e.g. zstd on newer Chromium) would be
@@ -102,7 +97,7 @@ export class FrameProxy {
 	 * Whether to accept self-signed certificates (browser.acceptSelfSignedCerts).
 	 * Read per request so setting changes apply without restarting the proxy.
 	 */
-	constructor(private readonly _acceptSelfSigned: () => boolean) {}
+	constructor(private readonly _acceptSelfSigned: () => boolean) { }
 
 	get baseUrl(): string {
 		return `http://127.0.0.1:${this._port}/p/${this._token}/`;
@@ -588,6 +583,20 @@ export class FrameProxy {
 			res.end(SHIM_JS);
 			return;
 		}
+		const dest = String(req.headers['sec-fetch-dest'] || '');
+		// Service worker scripts are refused in proxy mode: the proxy origin is
+		// SHARED across every site served through it, so a service worker
+		// registered by one site would persist (sticky port keeps the origin
+		// alive) and later intercept another site's requests — its cache knows
+		// nothing about the bounce/target semantics. The 404 makes
+		// navigator.serviceWorker.register() fail; direct mode is unaffected.
+		// (Observed in the field: opencode's web UI registers one — sw.js
+		// arrived with sec-fetch-dest: serviceworker.)
+		if (dest === 'serviceworker') {
+			res.writeHead(404);
+			res.end();
+			return;
+		}
 
 		const target = this._resolveTarget(reqUrl);
 		if (!target) {
@@ -596,18 +605,25 @@ export class FrameProxy {
 			return;
 		}
 
-		// Root-relative bounce for document navigations (see file header): a
-		// /p/<token>/... GET/HEAD navigation is answered with a redirect to the
-		// target's own path, so the iframe ends up at location.pathname == target
-		// path and pathname-routing SPAs work. The redirect is cheap (no page
-		// render between hops) and the fragment is carried over by the browser
-		// when the Location has none. Root-relative requests never enter this
-		// branch (_parseTarget is null for them), so it cannot loop.
+		// Root-relative bounce (see file header): a /p/<token>/... GET/HEAD request
+		// is answered with a redirect to the target's own path, so the iframe ends
+		// up at location.pathname == target path and pathname-routing SPAs work.
+		// NO sec-fetch-dest gate: VS Code's webview iframes send the document
+		// navigation with dest=empty (observed via request logging), so a
+		// dest-based gate silently never fired. The prefixed form is only ever
+		// produced by the webview's iframe.src bootstrap and by our own
+		// cross-origin redirect rewrites — both are navigations we want bounced —
+		// so every prefixed GET/HEAD gets the bounce. (The shim path above is
+		// matched first; root-relative requests never enter this branch
+		// (_parseTarget is null), so it cannot loop.)
+		// Diagnostic log kept commented — uncomment to trace requests in the
+		// Extension Development Host's Debug Console.
+		// console.log('[proxy]', req.method, reqUrl.slice(0, 120), 'dest=' + (dest || '(none)'));
 		if (
 			(req.method === 'GET' || req.method === 'HEAD') &&
-			this._parseTarget(reqUrl) !== null &&
-			DOCUMENT_DESTS.has(String(req.headers['sec-fetch-dest'] || ''))
+			this._parseTarget(reqUrl) !== null
 		) {
+			// console.log('[proxy] bounce ->', target.url.pathname + target.url.search);
 			res.writeHead(302, {
 				location: target.url.pathname + target.url.search + target.url.hash,
 				'cache-control': 'no-store',

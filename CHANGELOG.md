@@ -1,5 +1,16 @@
 # Changelog
 
+## [0.4.2] - 2026-10-29
+
+### Fixed
+
+- Proxy: **the 0.4.1 bounce never fired in VS Code webviews** — field request logging (temporary `[proxy]` console log) showed that VS Code's webview iframes send the document navigation with `sec-fetch-dest: empty` (not `iframe`), so 0.4.1's dest-gated bounce silently never ran and `opencode serve` still crashed with the same `TypeError: Cannot read properties of undefined (reading 'type')`. The gate is **removed**: every `/p/<token>/...` GET/HEAD is bounced to the target's own root-relative path — the prefixed form is only ever produced by the webview's `iframe.src` bootstrap and our own cross-origin redirect rewrites, both of which are navigations that must bounce (subresources/XHR use root-relative paths and never enter the branch, so it cannot loop). Verified with the exact field header values against a real `opencode serve`: `dest=empty` bootstrap → 302 → `/` serves the SPA with the shim injected; subresources/API untouched
+
+### Security
+
+- Proxy: **service worker scripts are refused (404)** in proxy mode — the same field log showed opencode's web UI attempting to register a service worker (`GET /sw.js` with `sec-fetch-dest: serviceworker`; `127.0.0.1` is a secure context). The proxy origin is **shared across every site served through it**, and with a sticky port it persists across sessions — a service worker registered by one site would survive and later intercept every other site's requests, with a cache that knows nothing about the bounce/target semantics. Refusing the script makes `navigator.serviceWorker.register()` fail; direct (non-proxy) mode is unaffected
+- Docs: `docs/ISSUES.md` gained a 4b correction subsection (how the gate was caught, the de-gating rationale and the lesson: verification must include the VS Code webview itself — its header behavior differs from a standalone browser), `docs/PROXY.md` updated accordingly
+
 ## [0.4.1] - 2026-10-29
 
 ### Fixed

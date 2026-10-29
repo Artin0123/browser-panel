@@ -134,7 +134,7 @@ The Clipboard API has been blocked because of a permissions policy...
 
 > **狀態標記**：[已完成]
 > **時間**：2026-10-29
-> **說明**：問題一已修復（v0.4.1，`src/proxy.ts` 文件導航 bounce）並以真實瀏覽器 + 真實 `FrameProxy` 端到端驗證；問題二經查證為 VS Code webview sandbox 固有限制，直連模式不可修，與本檔「已修 vs 未修」表一致。
+> **說明**：問題一於 v0.4.1 引入修復（`src/proxy.ts` 文件導航 bounce），同日實測發現其 `Sec-Fetch-Dest` 閘門在 VS Code webview 內永不命中（見 4b），於 v0.4.2 移除閘門完成修復；問題二經查證為 VS Code webview sandbox 固有限制，直連模式不可修，與本檔「已修 vs 未修」表一致。
 
 ## 定案摘要
 
@@ -174,13 +174,23 @@ opencode web UI 是把 `/` 當唯一入口的 SPA：路由解析器（`current-D
 
 ### 4. 驗證
 
-- 代理層 9 項斷言全過：bounce 保留目標路徑與 query、無循環、shim 注入、br/gzip 透傳、同源/跨源重定向改寫、`dest=empty` 與無 Sec-Fetch 引擎 fail-open 回舊行為、錯誤 Host 仍 403。
-- 修復後的真實 `FrameProxy` + 真實瀏覽器完整走過使用者場景：302 → `/` 正常渲染 → 密碼登入成功 → 會話列表 → 開啟實際會話（訊息/模型/計費全渲染），console 零錯誤。
+- 代理層 9 項斷言全過：bounce 保留目標路徑與 query、無循環、shim 注入、br/gzip 透傳、同源/跨源重定向改寫、錯誤 Host 仍 403。
+- 修復後的真實 `FrameProxy` + 真實瀏覽器完整走過使用者場景：密碼登入、會話列表、開啟會話，console 零錯誤。
+
+### 4b. 2026-10-29 修正（v0.4.2）：bounce 閘門在 VS Code webview 內失效（實測日誌抓到）
+
+初版 bounce 以 `Sec-Fetch-Dest ∈ {document, iframe, frame}` 閘門判定文檔導航——在獨立瀏覽器驗證通過（該環境確實送 `iframe`），但**VS Code 的 webview iframe 送的是 `dest=empty`**，閘門永遠不命中，使用者實測仍崩潰（同一堆疊）。臨時請求日誌（`[proxy] GET … dest=…`）直接暴露此事實。
+
+修正：
+
+1. **移除 dest 閘門**：prefix 形式的 GET/HEAD 一律 bounce。正當性——prefix 形式只可能來自 webview 的 `iframe.src` bootstrap 與我們自己的跨源重定向改寫，兩者都是要反彈的導航；子資源／XHR 走根相對路徑根本不會進入此分支。頁面自身對 prefix URL 的 `fetch()`（只有崩潰中的舊頁會做）被反彈也無害。
+2. **阻擋 Service Worker 腳本**：實測發現 opencode 嘗試註冊 SW（`GET /sw.js dest=serviceworker`）。proxy origin 為所有經代理網站**共用**，sticky port 又讓 origin 持久——A 站的 SW 會存續並攔截之後 B 站的請求（其快取不認得 bounce/目標語義），必須從源頭擋掉：`dest=serviceworker` 一律 404，`register()` 必然失敗；直連模式不受影響。
+
+驗證（真實 FrameProxy + 真實 opencode）：`dest=empty` bootstrap → 302 → `/` HTML+shim；無 dest → 同；`/sw.js`（SW dest）→ 404；子資源/API → 正常透傳；Host 檢查 → 403。**教訓：驗證環境必須含 VS Code webview 本身——它的 header 行為與獨立瀏覽器不同，不能以獨立瀏覽器的觀察外推。**
 
 ### 5. 邊界
 
 - POST/PUT 文檔導航（表單直接 POST 到帶前綴的絕對 URL）不 bounce（避開 307/308 語義陷阱），維持 prefix 直通，pathname 仍帶前綴——此場景罕見。
-- 不發 `Sec-Fetch-*` 的客戶端 fail-open 回舊行為（VS Code webview 的 Chromium 一定發送）。
 - 302 是服務端重定向，瀏覽器跟隨後才渲染，無舊方案「先渲染錯路徑再客戶端補救」的白屏；`#fragment` 在 Location 無 fragment 時由瀏覽器沿用原 URL 的。
 - 既有性質（非本次引入）：proxy port 每次啟動隨機 → opencode 存在 localStorage 的配對 token 隨 origin 失效，每次重開 VS Code 需重新配對。
 
@@ -279,4 +289,4 @@ VS Code webview 內容住在外層 sandboxed iframe（無 `allow-popups`）；HT
 | `src/webview/app.js` | `getConfig` 重試；無效 URL 錯誤頁（i18n）；`navigate()` 回傳布林 |
 | `docs/PROXY.md` | bounce 機制、崩潰根因、sticky port、撤銷「path-prefix 固有限制/目前不做」記載 |
 | `README.md` | proxy 設定說明與 popup 限制措辭更新 |
-| `CHANGELOG.md` / `package.json` | 0.4.1 |
+| `CHANGELOG.md` / `package.json` | 0.4.1 / 0.4.2 |
