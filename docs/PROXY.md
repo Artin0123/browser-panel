@@ -10,17 +10,19 @@
 
 这不是 Next.js 专用通道。任意 `http`/`https` localhost（或外网）都走同一条路径。静态页、普通多页站点本来就不会闪；会出问题的是**会读 `window.location.pathname` 或自订请求头**的 SPA / 开发服务器。
 
-## HTML shim（另开分页 / 剪贴簿 fallback）
+## HTML shim（另开分页 / 剪贴簿 fallback / URL 回报）
 
-对 `text/html` 回应会在 `</body>` 前插入：
+对 `text/html` 回应会在**最早位置**插入（`<head>` 之后，其次 `<html>` 之后、doctype 之后）——必须在任何页面脚本之前执行，否则 parse 阶段就调用 `window.open` 的页面（OAuth 自动跳转页）会先于拦截逃逸：
 
 ```html
-<script src="/p/<token>/__bp_shim.js"></script>
+<script nonce="…" src="/p/<token>/__bp_shim.js?bp=%7B…%7D"></script>
 ```
+
+`?bp=` 携带该文档的目标映射（JSON：目标 origin + 代理前缀），shim 据此把回報 URL 还原成目标 URL；独立的 inline bootstrap 会被 nonce 型 CSP 拦下，query 不会。若页面自带 CSP 限制脚本，代理会适配其政策（行为均经 Chromium 实测验证）：`script-src`（或缺省时 `default-src`）**含 nonce → 原样借用 nonce**（`'strict-dynamic'` 下同样合法），否则**缺 `'self'` 就追加 `'self'`**——host source 才能授权外部脚本（hash source 只匹配 inline 内容），Chromium 在 `'none'` 与其它来源并排时忽略 `'none'`。放宽到同源不新增攻击面：同源脚本内容与页面主体同出自目标服务器。
 
 代理只向上游请求自己能解压的编码（`gzip`、`deflate`、`br`，运行时支持时含 `zstd`），否则压缩响应会被当作 HTML 处理而渲染成乱码。
 
-脚本与页面同属代理 origin，将 `window.open`、`a[target=_blank|_new]` 以及 Clipboard API 失败时的写入，经 `parent.postMessage` 交给 webview：另开走 `openExternal`，复制走 `copyText` → `vscode.env.clipboard.writeText`（不依赖 webview 自己的 Clipboard Permissions-Policy）。不注入 `<base>`、不改写路径。超过约 5MB 的 HTML（含无 `Content-Length`、边收边超限）**跳过注入并原样串流**，不再回 502。
+脚本与页面同属代理 origin，将 `window.open`、`a[target=_blank|_new]` 以及 Clipboard API 失败时的写入，经 `parent.postMessage` 交给 webview：另开走 `openExternal`，复制走 `copyText` → `vscode.env.clipboard.writeText`（不依赖 webview 自己的 Clipboard Permissions-Policy）。它还向 webview 回报 `pageNavigated`（document start、`load`、`popstate`/`hashchange`、`pushState`/`replaceState` hook）——iframe 的 `src` 属性**不会**被 in-frame 导航更新，没有这些回报，webview 的 URL 栏、前进/后退堆叠和可达性探测在第一次点击链接后就会失准。不注入 `<base>`、不改写路径。超过约 5MB 的 HTML（含无 `Content-Length`、边收边超限）**跳过注入并原样串流**，不再回 502。
 
 ## URL 形态
 

@@ -142,6 +142,17 @@ import { svgIcon } from './icons.js';
 	let closed = false;
 	// Local frame-proxy state (host strips frame-blocking headers).
 	let proxy = { enabled: false, baseUrl: '' };
+	// Load/verify bookkeeping: a navigation is only "rendered" when the host
+	// probe returned ok AND the iframe's load event fired for the same URL —
+	// Chromium fires `load` for its own white error pages too, so neither
+	// signal alone may reveal the viewport (see the load handler below).
+	let probeOkUrl = ''; // probe already returned ok, waiting for the load event
+	let loadSettledUrl = ''; // load already fired, waiting for the probe verdict
+	// The proxied page reports its real URL via the shim (an iframe's src
+	// attribute is NOT updated by in-frame navigations, so attribute-based
+	// tracking goes stale after the first link click / redirect).
+	let shimReportSinceNav = false;
+	let lastShimUrl = '';
 
 	// Device presets (CSS pixel width x height; null = fill the container).
 	const DEVICE_PRESETS = [
@@ -243,8 +254,17 @@ import { svgIcon } from './icons.js';
 		return scheme + '://' + host + path;
 	}
 
+	function resetLoadTracking() {
+		pendingCheck = null;
+		probeOkUrl = '';
+		loadSettledUrl = '';
+		shimReportSinceNav = false;
+		lastShimUrl = '';
+	}
+
 	function clearFrameSrc() {
 		frameSrcSeq++;
+		resetLoadTracking();
 		frame.removeAttribute('src');
 	}
 
@@ -253,9 +273,12 @@ import { svgIcon } from './icons.js';
 	 * a same-value setAttribute is a no-op and its 'load' event never fires (the
 	 * loading state would hang for the full 20s safety timeout). Cross-origin
 	 * iframes cannot be reloaded via contentWindow.location.reload(), so drop src
-	 * and restore it on the next frame instead.
+	 * and restore it on the next frame instead. Every src set starts a fresh
+	 * navigation: drop the previous navigation's probe/verify bookkeeping (the
+	 * callers assign their own fresh pendingCheck right after this).
 	 */
 	function setFrameSrc(src) {
+		resetLoadTracking();
 		if (frame.getAttribute('src') === src) {
 			const seq = ++frameSrcSeq;
 			frame.removeAttribute('src');
@@ -459,7 +482,11 @@ import { svgIcon } from './icons.js';
 		// bar. Never show an error page: the page may be rendering fine (false positive).
 		clearTimeout(loadTimer);
 		loadTimer = setTimeout(() => {
-			if (pendingCheck && pendingCheck.url === u && !closed) {
+			// Safety net: the probe passed or its response was lost, and the iframe
+			// load never settled (a page hanging on a subresource) — stop the
+			// connecting bar so the UI doesn't spin forever. Never reveals or hides
+			// anything: the probe verdict (whenever it arrives) still decides.
+			if (nav.current === u && !closed) {
 				stopConnecting();
 				stopLoading();
 			}
@@ -550,35 +577,101 @@ import { svgIcon } from './icons.js';
 		vscode.postMessage({ type: 'checkUrl', url: u });
 		clearTimeout(loadTimer);
 		loadTimer = setTimeout(() => {
-			if (pendingCheck && pendingCheck.url === u && !closed) {
+			// Safety net: the probe passed or its response was lost, and the iframe
+			// load never settled (a page hanging on a subresource) — stop the
+			// connecting bar so the UI doesn't spin forever. Never reveals or hides
+			// anything: the probe verdict (whenever it arrives) still decides.
+			if (nav.current === u && !closed) {
 				stopConnecting();
 				stopLoading();
 			}
 		}, 20000);
 	}
 
-	// Track in-iframe navigations (link clicks / redirects) so back/forward work.
-	// iframe does not fire `loadstart`; loading state is set at navigate/reload.
-	frame.addEventListener('load', () => {
-		const url = fromProxyUrl(currentUrl());
-		if (!url) {
-			return; // ignore about:blank loads (e.g. right after close)
+	/**
+	 * Single source of truth for frame URL bookkeeping, called whenever the
+	 * frame's current document URL becomes known: the iframe 'load' event and
+	 * shim 'pageNavigated' reports (the src attribute is not updated by in-frame
+	 * navigations, so attribute-based tracking goes stale after the first link
+	 * click / redirect — back/forward, the URL bar and reload all relied on it).
+	 * The first commit for a URL does the work; duplicates (load + report for
+	 * the same document) are no-ops.
+	 */
+	function commitUrl(url) {
+		if (!url || closed) {
+			return;
 		}
-		clearTimeout(loadTimer);
-		pendingCheck = null; // load settled; any in-flight probe response is stale
-		stopConnecting();
-		hideError();
-		// Only programmatic back/forward update the stacks synchronously;
-		// any other navigation moves the previous page into the back stack.
-		if (!programmaticNav && nav.current && nav.current !== url) {
+		// Consume the programmatic flag first: back/forward navigations must not
+		// push the page they are leaving onto the stacks again.
+		const wasProgrammatic = programmaticNav;
+		programmaticNav = false;
+		if (url === nav.current) {
+			return; // already tracked (load + shim report for the same document)
+		}
+		// Any non-programmatic navigation moves the previous page into the back
+		// stack (in-iframe link clicks, redirects, SPA pushState — like a
+		// browser's joint session history).
+		if (!wasProgrammatic && nav.current) {
 			nav.back.push(nav.current);
 			nav.forward = [];
 		}
 		nav.current = url;
-		programmaticNav = false;
-		urlInput.value = url;
+		lastUrl = url;
+		// Never clobber an address the user is typing (a background SPA route
+		// change or a late shim report must not rewrite the input mid-keystroke).
+		if (document.activeElement !== urlInput) {
+			urlInput.value = url;
+		}
 		updateButtons();
-		btnReload.classList.remove('loading');
+	}
+
+	/**
+	 * Finalize a navigation whose render is CONFIRMED: the host probe returned
+	 * ok AND the iframe load event fired for the same URL. Only this combination
+	 * may reveal the viewport / hide the error page. Treating the load event
+	 * alone as success was the white-screen bug: Chromium fires `load` for its
+	 * own error pages too (unreachable host, interrupted connection), so the
+	 * white error frame was revealed and the in-flight probe's failure verdict
+	 * was thrown away — a dead connection looked like an empty white page with
+	 * no error UI and no reconnect.
+	 */
+	function maybeFinalize() {
+		const url = probeOkUrl;
+		if (!url || loadSettledUrl !== url || pendingCheck) {
+			return;
+		}
+		probeOkUrl = '';
+		loadSettledUrl = '';
+		stopConnecting();
+		stopLoading();
+		hideError(); // reveals the viewport (unless closed), clears error + reconnect state
+	}
+
+	// Track in-iframe navigations (link clicks / redirects) so back/forward work.
+	// iframe does not fire `loadstart`; loading state is set at navigate/reload.
+	frame.addEventListener('load', () => {
+		clearTimeout(loadTimer);
+		// Prefer the shim's report of the real document URL: after any in-frame
+		// navigation the src attribute is stale (it still names the page the
+		// panel originally loaded).
+		const url = shimReportSinceNav && lastShimUrl ? lastShimUrl : fromProxyUrl(currentUrl());
+		if (!url) {
+			return; // ignore about:blank loads (e.g. right after close)
+		}
+		commitUrl(url);
+		loadSettledUrl = url;
+		if (pendingCheck && pendingCheck.url === url) {
+			return; // probe in flight — its verdict decides (ok: finalize, fail: error page)
+		}
+		if (probeOkUrl === url) {
+			maybeFinalize(); // probe already passed, this load completes the pair
+			return;
+		}
+		// No probe covers this load (an in-frame navigation the panel didn't
+		// initiate). Start one — it is the only failure detector we have for
+		// what actually rendered.
+		pendingCheck = { id: ++checkSeq, url };
+		vscode.postMessage({ type: 'checkUrl', url });
 	});
 
 	// ---------------------------------------------------------------------------
@@ -745,7 +838,9 @@ import { svgIcon } from './icons.js';
 			}),
 			menuItem('link-external', S.menuExternal, () => {
 				hideMenu();
-				const url = fromProxyUrl(currentUrl()) || nav.current || config.defaultUrl;
+				// nav.current is the accurately tracked URL (the src attribute goes
+				// stale after in-frame navigations).
+				const url = nav.current || fromProxyUrl(currentUrl()) || config.defaultUrl;
 				if (url) {
 					vscode.postMessage({ type: 'openExternal', url });
 				}
@@ -937,6 +1032,37 @@ import { svgIcon } from './icons.js';
 				vscode.postMessage({ type: 'copyText', text: msg.text });
 				return;
 			}
+			if (msg.type === 'pageNavigated' && typeof msg.url === 'string' && msg.url) {
+				// The proxied page reports its own URL (the iframe's src attribute
+				// is not updated by in-frame navigations). Explicit-proxy-form URLs
+				// are stripped back to the target URL by fromProxyUrl; proxy-origin
+				// URLs without the prefix (missing bootstrap) are unusable — drop.
+				let u = msg.url;
+				if (proxy.baseUrl && u.lastIndexOf(proxy.baseUrl, 0) === 0) {
+					u = fromProxyUrl(u);
+				} else if (proxy.baseUrl) {
+					try {
+						if (new URL(u).origin === new URL(proxy.baseUrl).origin) {
+							return;
+						}
+					} catch {
+						// not absolute — normalizeUrl rejects it below
+					}
+				}
+				// With the error page up the frame src is cleared: any report still
+				// arriving comes from a stale document — except while a background
+				// reconnect attempt is loading the page (its reports are current).
+				if (!errorState.hidden && !reconnectAttemptPending) {
+					return;
+				}
+				const n = normalizeUrl(u);
+				if (n) {
+					shimReportSinceNav = true;
+					lastShimUrl = n;
+					commitUrl(n);
+				}
+				return;
+			}
 		}
 		if (msg.type === 'config') {
 			configReceived = true;
@@ -988,13 +1114,20 @@ import { svgIcon } from './icons.js';
 			// ignored); report against the normalized pending URL, never the raw
 			// message value.
 			if (pendingCheck && msg.url === pendingCheck.url) {
+				const checked = pendingCheck.url;
+				pendingCheck = null;
 				if (!msg.ok) {
-					showError(pendingCheck.url, msg.error || '', false);
+					showError(checked, msg.error || '', false);
 				} else if (msg.frameBlocked) {
 					// Reachable, but the site refuses to render inside an iframe.
-					showError(pendingCheck.url, '', true);
+					showError(checked, '', true);
+				} else {
+					// Reachable: keep the connecting bar until the iframe load
+					// settles, then finalize. If the load already fired, this
+					// completes the confirmed-render pair and finalizes now.
+					probeOkUrl = checked;
+					maybeFinalize();
 				}
-				// ok: keep the connecting bar until the iframe load settles
 			}
 		} else if (msg.type === 'storageCleared') {
 			// Host cleared history + lastUrl; reload the page to drop in-memory state.

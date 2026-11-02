@@ -22,8 +22,13 @@ import * as zlib from 'zlib';
  * - Service worker scripts are refused (the shared proxy origin must never be
  *   captured by one site's service worker).
  * - No <base> / path rewriting (those caused SPA redirect loops). For text/html
- *   only, may buffer and inject a tiny external shim script tag so window.open /
- *   target=_blank and clipboard fallback can reach the parent webview.
+ *   only, may buffer and inject the shim at the earliest possible position
+ *   (right after <head>) so window.open / target=_blank are intercepted before
+ *   any page script runs — pages that auto-open OAuth popups during parse
+ *   would otherwise escape the shim. If the page's CSP restricts scripts, the
+ *   shim reuses the policy's own nonce or appends 'self' to script-src /
+ *   default-src (host sources are what authorize external scripts), since a
+ *   blocked shim means blocked popups and no URL tracking.
  * - Set-Cookie is intentionally dropped (logins don't persist via the proxy).
  */
 
@@ -32,13 +37,34 @@ const HTML_INJECT_MAX_BYTES = 5 * 1024 * 1024;
 
 /**
  * Served at /p/<token>/__bp_shim.js and referenced from injected script tags.
- * Bridges window.open / target=_blank and clipboard failures to the parent webview.
+ * Bridges window.open / target=_blank and clipboard failures to the parent webview,
+ * and reports the document's real URL back to the parent (an iframe's src
+ * attribute is NOT updated by in-frame navigations, so without these reports the
+ * webview cannot track link clicks/redirects — breaking back/forward, the URL
+ * bar and reachability probing of the actually-loaded page).
+ *
+ * The per-document target mapping rides on the script URL's ?bp= query (JSON,
+ * URL-encoded): the target origin for root-relative documents, and the proxy
+ * prefix to detect the explicit /p/<token>/... document form. A separate inline
+ * bootstrap would be blocked by nonce-based CSPs; the query is not.
  */
 const SHIM_JS =
 	'(function(){' +
+	'var bp={};try{bp=JSON.parse(new URL(document.currentScript.src).searchParams.get("bp")||"{}")}catch(e){}' +
 	'function abs(u){try{return new URL(u,location.href).href}catch(e){return null}}' +
 	'function send(t,p){try{parent.postMessage(Object.assign({type:t},p),"*")}catch(e){}}' +
 	'function openExt(u){var a=abs(u);if(a)send("openExternal",{url:a})}' +
+	'function reportUrl(){' +
+	'var p=location.pathname;' +
+	'var u=(bp.prefix&&p.lastIndexOf(bp.prefix,0)===0)?location.href:((bp.origin||location.origin)+p+location.search+location.hash);' +
+	'send("pageNavigated",{url:u})' +
+	'}' +
+	'reportUrl();' +
+	'window.addEventListener("load",reportUrl);' +
+	'window.addEventListener("popstate",reportUrl);' +
+	'window.addEventListener("hashchange",reportUrl);' +
+	'try{var ps=history.pushState;history.pushState=function(){var r=ps.apply(this,arguments);setTimeout(reportUrl,0);return r};}catch(e){}' +
+	'try{var rs=history.replaceState;history.replaceState=function(){var r=rs.apply(this,arguments);setTimeout(reportUrl,0);return r};}catch(e){}' +
 	'window.open=function(u){if(u)openExt(u);return null};' +
 	'document.addEventListener("click",function(e){' +
 	'var t=e.target;while(t&&t.tagName!=="A")t=t.parentElement;if(!t)return;' +
@@ -471,16 +497,108 @@ export class FrameProxy {
 		return buf;
 	}
 
-	/** Insert external shim script before </body> (or append). */
-	private _injectShimTag(html: Buffer): Buffer {
-		const tag = '<script src="' + this._shimPath + '"></script>';
-		const s = html.toString('utf8');
-		const lower = s.toLowerCase();
-		const idx = lower.lastIndexOf('</body>');
-		if (idx !== -1) {
-			return Buffer.from(s.slice(0, idx) + tag + s.slice(idx), 'utf8');
+	/**
+	 * Make room for the shim in the page's own CSP and lift a nonce if one
+	 * exists. Without this, pages with a strict script-src (nonce / allowlist —
+	 * typical for auth providers) block the shim entirely: popups stop being
+	 * intercepted and the webview loses URL tracking. Rules (verified against
+	 * Chromium):
+	 * - script-src with a nonce: leave the policy untouched, return the nonce
+	 *   (a nonce'd external script is allowed, also under 'strict-dynamic').
+	 * - otherwise append 'self' to script-src when missing — a host source is
+	 *   what authorizes EXTERNAL scripts (hash sources do not: they only match
+	 *   inline content, verified), and Chromium ignores 'none' when it is
+	 *   combined with other sources, so 'none' policies open up too. 'self'
+	 *   means the document's own origin, which behind the proxy IS the proxy
+	 *   origin the shim is served from. Loosening to same-origin adds no
+	 *   attacker power: same-origin script content comes from the same target
+	 *   server that already controls the page body.
+	 * - no script-src but a default-src: a nonce there also authorizes a
+	 *   nonce'd external script (default-src governs scripts when script-src is
+	 *   absent) — reuse it and leave the policy untouched. Otherwise append
+	 *   'self' to default-src (NOT a new script-src directive: that would
+	 *   override default-src and strip e.g. its 'unsafe-inline' from the
+	 *   page's own inline scripts).
+	 */
+	private _cspForShim(csp: string): { csp: string; nonce: string } {
+		const src = (csp || '').trim();
+		if (!src) {
+			return { csp: src, nonce: '' };
 		}
-		return Buffer.from(s + tag, 'utf8');
+		const directives = src.split(';').map((d) => d.trim()).filter((d) => d.length > 0);
+		const scriptIdx = directives.findIndex((d) => /^script-src(\s|$)/i.test(d));
+		if (scriptIdx !== -1) {
+			const values = directives[scriptIdx].split(/\s+/);
+			const nonceTok = values.find((v) => /^'nonce-[^']+'$/i.test(v));
+			if (nonceTok) {
+				// Strip the surrounding quotes; keep only token-safe characters.
+				const nonce = nonceTok.slice(7, -1).replace(/[^A-Za-z0-9+/=_-]/g, '');
+				return { csp: src, nonce };
+			}
+			if (!values.some((v) => /^'self'$/i.test(v))) {
+				directives[scriptIdx] += " 'self'";
+				return { csp: directives.join('; '), nonce: '' };
+			}
+			return { csp: src, nonce: '' };
+		}
+		const defaultIdx = directives.findIndex((d) => /^default-src(\s|$)/i.test(d));
+		if (defaultIdx !== -1) {
+			const values = directives[defaultIdx].split(/\s+/);
+			const nonceTok = values.find((v) => /^'nonce-[^']+'$/i.test(v));
+			if (nonceTok) {
+				const nonce = nonceTok.slice(7, -1).replace(/[^A-Za-z0-9+/=_-]/g, '');
+				return { csp: src, nonce };
+			}
+			if (!values.some((v) => /^'self'$/i.test(v))) {
+				directives[defaultIdx] += " 'self'";
+				return { csp: directives.join('; '), nonce: '' };
+			}
+		}
+		// No script-src, and default-src either absent or already allowing
+		// same-origin: the shim loads as-is.
+		return { csp: src, nonce: '' };
+	}
+
+	/** Shim script URL carrying the per-document target mapping in ?bp=. */
+	private _shimSrc(target: ProxyTarget): string {
+		const bp = JSON.stringify({
+			origin: this._targetOrigin(target),
+			prefix: '/p/' + this._token + '/',
+		}).replace(/</g, '\\u003c');
+		return this._shimPath + '?bp=' + encodeURIComponent(bp);
+	}
+
+	/**
+	 * Insert the shim script at the earliest possible position — right after
+	 * <head> (then <html>, then the doctype) — so it runs BEFORE any page
+	 * script: pages that call window.open during parse (OAuth auto-open pages)
+	 * would otherwise escape the interception injected before </body>. The
+	 * returned csp is the (possibly relaxed) policy to send along with the
+	 * injected body; '' means no CSP header.
+	 */
+	private _injectShimTag(html: Buffer, target: ProxyTarget, csp: string): { html: Buffer; csp: string } {
+		const { csp: cspOut, nonce } = this._cspForShim(csp);
+		const nonceAttr = nonce ? ' nonce="' + nonce + '"' : '';
+		const tag = '<script' + nonceAttr + ' src="' + this._shimSrc(target) + '"></script>';
+		const s = html.toString('utf8');
+		// <head> (not a prefix match — <header> would false-positive).
+		let m = /<head(\s[^>]*)?>/i.exec(s);
+		if (m) {
+			const at = m.index + m[0].length;
+			return { html: Buffer.from(s.slice(0, at) + tag + s.slice(at), 'utf8'), csp: cspOut };
+		}
+		m = /<html(\s[^>]*)?>/i.exec(s);
+		if (m) {
+			const at = m.index + m[0].length;
+			return { html: Buffer.from(s.slice(0, at) + tag + s.slice(at), 'utf8'), csp: cspOut };
+		}
+		// No <html> either: after the doctype if there is one — inserting before
+		// it would flip the document into quirks mode.
+		m = /^(\s*<!doctype[^>]*>)/i.exec(s);
+		if (m) {
+			return { html: Buffer.from(m[1] + tag + s.slice(m[1].length), 'utf8'), csp: cspOut };
+		}
+		return { html: Buffer.from(tag + s, 'utf8'), csp: cspOut };
 	}
 
 	private _pipeOrInjectHtml(
@@ -552,7 +670,20 @@ export class FrameProxy {
 				if (encoding) {
 					buf = this._decompressBody(buf, encoding);
 				}
-				buf = Buffer.from(this._injectShimTag(buf));
+				const injected = this._injectShimTag(
+					buf,
+					target,
+					String(outHeaders['content-security-policy'] || '')
+				);
+				buf = injected.html;
+				// Send the shim-adapted CSP only on the injected path — if injection
+				// failed and we serve the raw body below, the page keeps its original
+				// policy (and its original script rules).
+				if (injected.csp) {
+					outHeaders['content-security-policy'] = injected.csp;
+				} else {
+					delete outHeaders['content-security-policy'];
+				}
 				delete outHeaders['content-encoding'];
 				delete outHeaders['content-length'];
 				outHeaders['content-length'] = buf.length;
