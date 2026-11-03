@@ -446,6 +446,23 @@ export class FrameProxy {
 			outHeaders[k] = v;
 		}
 
+		// The proxy origin is SHARED across every site served through it: a
+		// root-relative URL (`/`, `/login`, …) means a different target at
+		// different times (whichever site was parsed last). Any cacheable
+		// upstream response would therefore be stored by the browser under that
+		// shared URL and later served for a DIFFERENT site's navigation —
+		// observed in the field: a site's `GET / → 301 https://same-host-upgrade`
+		// (cross-origin by scheme) is rewritten to the prefixed form, its bounce
+		// lands back on `/`, and the cached 301 then hijacks every later
+		// navigation that bounces through `/` — Home/Back to another site looped
+		// on the first site's proxy URL with a white screen. Redirects are the
+		// sharpest edge (their Location outlives their target), but a cacheable
+		// body poisons the same way, so responses are marked uncacheable
+		// wholesale: a local dev proxy gains nothing from browser caching.
+		outHeaders['cache-control'] = 'no-store';
+		delete outHeaders.expires;
+		delete outHeaders.pragma;
+
 		const status = pres.statusCode ?? 502;
 		if (status >= 300 && status < 400 && outHeaders.location) {
 			try {

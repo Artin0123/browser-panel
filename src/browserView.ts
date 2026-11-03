@@ -28,6 +28,8 @@ interface UrlStatus {
 	ok: boolean;
 	error?: string;
 	frameBlocked?: boolean;
+	status?: number;
+	emptyBody?: boolean;
 }
 
 interface HistoryEntry {
@@ -46,7 +48,7 @@ const HISTORY_KEY = 'browser.history';
 const LAST_URL_KEY = 'browser.lastUrl';
 const CLOSED_KEY = 'browser.closed';
 // Keep in sync with package.json — used for webview resource cache-busting.
-const EXTENSION_VERSION = '0.4.3';
+const EXTENSION_VERSION = '0.4.4';
 
 export class BrowserViewProvider implements vscode.WebviewViewProvider {
 	public static readonly viewType = 'browser.view';
@@ -412,7 +414,6 @@ export class BrowserViewProvider implements vscode.WebviewViewProvider {
 					if (timer) {
 						clearTimeout(timer);
 					}
-					res.resume(); // discard the body, we only care about reachability
 					// Body read can fail mid-stream (ECONNRESET etc.); without this
 					// listener the error throws as an uncaught exception in the host.
 					// Safe even after resolve() — a later resolve is a no-op.
@@ -421,6 +422,7 @@ export class BrowserViewProvider implements vscode.WebviewViewProvider {
 					});
 					const status = res.statusCode ?? 502;
 					if (status >= 300 && status < 400 && res.headers.location && depth < 3) {
+						res.resume(); // discard the redirect body, follow the Location
 						try {
 							const next = new URL(String(res.headers.location), u).href;
 							resolve(this._request(next, depth + 1));
@@ -435,7 +437,34 @@ export class BrowserViewProvider implements vscode.WebviewViewProvider {
 						!(getConfig().proxyEnabled && this._proxy.listening) &&
 						(!!res.headers['x-frame-options'] ||
 							/frame-ancestors/i.test(String(res.headers['content-security-policy'] || '')));
-					resolve({ ok: true, frameBlocked });
+					// Error-status detection: a 4xx/5xx document with an (almost) empty
+					// body renders as a bare white frame — indistinguishable from a
+					// dead navigation (observed: bot-protected sites answer proxied
+					// iframes with empty 403/404). Report the status and whether the
+					// body carries any content so the webview can show a real error
+					// page instead of white. A body with actual content is the site's
+					// own error page and renders as-is, like a normal browser.
+					let bodyBytes = 0;
+					const EMPTY_BODY_LIMIT = 64;
+					let settled = false;
+					const finish = () => {
+						if (settled) {
+							return;
+						}
+						settled = true;
+						resolve({ ok: true, status, emptyBody: bodyBytes <= EMPTY_BODY_LIMIT, frameBlocked });
+					};
+					res.on('data', (chunk: Buffer) => {
+						bodyBytes += chunk.length;
+						if (bodyBytes > EMPTY_BODY_LIMIT) {
+							res.destroy(); // enough evidence of a real body — stop draining
+						}
+					});
+					res.on('end', finish);
+					// A destroyed stream (real body found) closes without 'end' — the
+					// verdict is already known, resolve immediately instead of hanging
+					// until the 8s timer.
+					res.on('close', finish);
 				}
 			);
 			timer = setTimeout(() => {

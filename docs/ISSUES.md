@@ -104,6 +104,8 @@ The Clipboard API has been blocked because of a permissions policy...
 | 項目 | 狀態 | 說明 |
 |------|------|------|
 | 連線失敗轉圈 / 自動重連 | **已修** | 停 spinner + 10s 重連 UI |
+| 共享 origin 快取劫持（A 站 301 污染 `/`，B 站導航被彈回 A 站） | **已修（v0.4.4）** | 代理回應一律 `no-store`；詳見 PROXY.md |
+| 空 body 的 4xx/5xx 顯示成無訊息白屏 | **已修（v0.4.4）** | 探測回報最終 status；≥400 且 body 近空 → 顯示「HTTP 404/403…」錯誤頁（4xx 不重試、5xx 續重連）；有內容的站內錯誤頁照常渲染 |
 | 關閉後記住狀態 + Reopen 載入 lastUrl | **已修** | 見問題三 |
 | 剪貼簿 `writeText` Permissions Policy | **已修（需 proxy）** | shim → `copyText` → extension clipboard |
 | 頁內 `_blank` / `window.open` | **已修（需 proxy）** | shim → `openExternal` |

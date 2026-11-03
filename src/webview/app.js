@@ -55,6 +55,7 @@ import { svgIcon } from './icons.js';
 			emptyTitle: 'Browser closed', emptyReopen: 'Reopen',
 			errorTitle: 'Cannot connect',
 			invalidUrl: 'Invalid URL',
+			httpError: 'The site responded with HTTP {code}',
 			embedTitle: 'Site cannot be embedded', embedDetail: 'The site blocks embedding (X-Frame-Options / CSP frame-ancestors). Use "Open in external browser" or enable the browser.proxyEnabled setting.',
 			proxyAuthNote: 'The URL contains credentials (user:pass) that the proxy cannot forward; the site is loaded directly instead.',
 			reconnectIn: 'Retrying in {n}s\u2026',
@@ -73,6 +74,7 @@ import { svgIcon } from './icons.js';
 			emptyTitle: '浏览器已关闭', emptyReopen: '重新打开',
 			errorTitle: '无法连接',
 			invalidUrl: '无效网址',
+			httpError: '网站响应了 HTTP {code}',
 			embedTitle: '网站无法内嵌', embedDetail: '该网站禁止内嵌（X-Frame-Options / CSP frame-ancestors）。请使用「在外部浏览器中打开」，或开启 browser.proxyEnabled 设置。',
 			proxyAuthNote: '网址包含认证信息（user:pass），Proxy 无法转发，已改为直接连接加载。',
 			reconnectIn: '{n} 秒后自动重试\u2026',
@@ -91,6 +93,7 @@ import { svgIcon } from './icons.js';
 			emptyTitle: '瀏覽器已關閉', emptyReopen: '重新開啟',
 			errorTitle: '無法連線',
 			invalidUrl: '無效網址',
+			httpError: '網站回應了 HTTP {code}',
 			embedTitle: '網站無法內嵌', embedDetail: '該網站禁止內嵌（X-Frame-Options / CSP frame-ancestors）。請使用「在外部瀏覽器開啟」，或開啟 browser.proxyEnabled 設定。',
 			proxyAuthNote: '網址包含認證資訊（user:pass），Proxy 無法轉發，已改為直接連線載入。',
 			reconnectIn: '{n} 秒後自動重試\u2026',
@@ -1125,8 +1128,21 @@ import { svgIcon } from './icons.js';
 					// Reachable: keep the connecting bar until the iframe load
 					// settles, then finalize. If the load already fired, this
 					// completes the confirmed-render pair and finalizes now.
-					probeOkUrl = checked;
-					maybeFinalize();
+					if (msg.status >= 400 && msg.emptyBody) {
+						// An error status with an (almost) empty body renders as a
+						// bare white frame — surface it as a real error page instead
+						// (observed: bot-protected sites answer proxied iframes with
+						// empty 403/404). The site's own styled error pages carry a
+						// real body and render untouched, like a normal browser.
+						showError(checked, (S.httpError || '').replace('{code}', String(msg.status)), false);
+						errorTitleEl.textContent = (S.httpError || S.errorTitle).replace('{code}', String(msg.status));
+						if (msg.status < 500) {
+							clearReconnect(); // retrying a 403/404 is pointless; 5xx keeps retrying
+						}
+					} else {
+						probeOkUrl = checked;
+						maybeFinalize();
+					}
 				}
 			}
 		} else if (msg.type === 'storageCleared') {

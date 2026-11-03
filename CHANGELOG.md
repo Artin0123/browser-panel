@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.4.4] - 2026-11-03
+
+### Fixed
+
+- Proxy: **cached cross-site redirects no longer hijack the panel's navigation** (reported: start on `localhost:80`, type `chatgpt.com` → white 404; then Home/Back show `localhost` in the URL bar while the iframe actually stays on `…/p/<token>/https/chatgpt.com/`, still 404, still white — and the panel's Clear-storage does not help, since the poison lives in the browser's HTTP cache, not in workspace state). Root cause — a structural flaw present since the 0.4.1 cross-origin redirect rewrite + document bounce, not a regression of 0.4.3: the proxy origin is **shared** by every proxied site, and the bounce lands documents on **root-relative paths** (`/`, …) whose meaning changes with the last parsed target. An upstream `301` (e.g. chatgpt.com's `http → https` upgrade, which the proxy must rewrite as cross-origin — scheme is part of the origin) was forwarded **with its original cache headers**, so the browser stored `GET <proxy-origin>/ → 301 → …/https/chatgpt.com/` under the **shared, target-agnostic URL `/`**. Every later navigation bounces through `/` (that is what the bounce is), hit the poisoned cache entry and was thrown back onto the first site's proxy URL — Home/Back to a different site looped there with a white screen, exactly as reported. Fix: **responses relayed by the proxy are marked `cache-control: no-store` wholesale** (and `expires`/`pragma` dropped) — a local dev proxy gains nothing from browser caching, while a shared-origin cache would serve one site's content/redirects for another's. Reproduced on stock 0.4.3 (built from the 0.4.3 commit in a worktree) with a `http → 301 → https → 404` stand-in: Home loops on the first site's proxy URL exactly as reported; on 0.4.4 the same flow lands on the correct targets. Workaround for un-upgraded installs: navigating with any query string (`…/?r=1`) bypasses the poisoned `/` entry, since the bounce preserves the query
+
+- Webview: **an HTTP error status with an empty body no longer shows as a bare white frame**. Bot-protected sites (Cloudflare-era chatgpt.com among them) answer proxied iframe loads with empty 403/404 bodies, which render as pure white with no hint of what happened. The reachability probe now reports the final HTTP status and whether the body carried any content; when the status is ≥ 400 **and** the body is (almost) empty, the panel shows a real error page — "The site responded with HTTP 404" + the URL + "Open in external browser" — instead of white. Error statuses with a real body are the site's own error page and render untouched (like a normal browser); 4xx does not arm the auto-reconnect (retrying a 403/404 is pointless), 5xx keeps retrying
+
 ## [0.4.3] - 2026-11-02
 
 ### Fixed

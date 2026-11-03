@@ -34,6 +34,8 @@ http://127.0.0.1:<port>/p/<token>/<scheme>/<host>/<path>
 - 根相对路径（`/_next/static/...`、`/api/...`）落到代理根上，按「上一次解析到的目标」转发；目标 origin 由代理侧拼接锁定，请求路径不能改写目标（`//host`、绝对形式、反斜线等请求目标会被拒绝）。
 - **文档导航 bounce（v0.4.1，閘門修正 v0.4.2）**：以 `/p/<token>/...` 形式到达的 GET/HEAD 文档导航不再直接在代理路径下伺服，而是 302 到目标自己的根相对路径。iframe 的 `location.pathname` 因此永远是目标路径、绝不是代理前缀——按 `location.pathname` 做路由的 SPA（opencode web UI、其它把 `/` 当唯一入口的 PWA）不再因解析出 `Unrecognised route!` 而崩溃。**不按 `Sec-Fetch-Dest` 閘門**（VS Code webview 的 iframe 文檔導航送 `dest=empty`，0.4.1 的閘門在真實環境永不命中，v0.4.2 移除；prefix 形式只來自 webview bootstrap 與跨源重定向改寫，本來就全是導航）。
 - **Service Worker 腳本一律 404（v0.4.2）**：proxy origin 為所有經代理網站共用（sticky port 下更持久），任一網站註冊的 SW 都會存續並攔截之後其他網站的請求（opencode 實測就會註冊）。`dest=serviceworker` 的請求回 404，`register()` 必然失敗；直連模式不受影響。
+- **回應一律 `no-store`（v0.4.4）**：proxy origin 為所有網站共用、bounce 又把文檔落在根相對路徑（`/`…）上，同一 URL 的語意隨「最後解析到的目標」漂移——上游任何**可快取**回應（最典型：`http → https` 升級的 301，跨 scheme 即跨源、必須改寫成 prefixed 形式）被瀏覽器快取在共享 URL 上後，會劫持**之後所有**經過該路徑的導航（實測：chatgpt.com 的 301 污染 `/` 後，Home/Back 到其他站被彈回 chatgpt 的 proxy URL、白屏循環）。本地開發代理從瀏覽器快取一無所獲，故所有轉發回應強制 `cache-control: no-store`（並移除 `expires`/`pragma`）；bounce 自身的 302 早已 `no-store`。
+- **空 body 的 4xx/5xx 顯示錯誤頁（v0.4.4）**：探測（`checkUrl`）回報最終 HTTP status 與 body 是否近空；status ≥ 400 且近空（原本只會渲染成無訊息白屏，如 bot 防護站對代理 iframe 回的空 403/404）時，webview 顯示「HTTP 404/403…」錯誤頁——4xx 不啟動自動重連、5xx 續重連。站點自帶實質內容的錯誤頁照常渲染（與一般瀏覽器一致）。
 - 同源 302/3xx 重定向同样改写为根相对路径（原来是带前缀形式）；跨源重定向仍走 `/p/<token>/...` 显式形式，随后被同一条 bounce 规则落到新目标的根相对路径上。
 - **Sticky port（v0.4.1）**：綁定過的 port 記在 globalState，下次 start 優先重用（被其他進程佔用或第二個 VS Code 視窗時自動 fallback 到隨機 port）。port 穩定 → proxy origin 穩定 → 內嵌頁的 localStorage（opencode 的配對 token、主題設定）跨重啟保存，不必每次重新配對。
 - 地址栏始终显示真实目标 URL，不显示代理 URL。
