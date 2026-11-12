@@ -7,18 +7,73 @@ on:
       # Version numbers carry no prefix: 0.4.5, 0.5.0, ...
       - "[0-9]+.[0-9]+.[0-9]+"
 
+concurrency:
+  # One release at a time: two runs racing on the same version would fight over
+  # the Marketplace entry and the release asset.
+  group: publish
+  cancel-in-progress: false
+
 jobs:
   publish:
     runs-on: ubuntu-latest
     environment: production
     permissions:
-      contents: read
-      id-token: write
+      contents: write # create the release and upload the vsix
+      id-token: write # trusted publishing to the Marketplace
+
     steps:
       - uses: actions/checkout@v4
+
       - uses: actions/setup-node@v4
         with:
           node-version: 22
           cache: npm
+
       - run: npm ci
-      - run: npx @vscode/vsce publish --oidc
+
+      - name: Resolve the version
+        run: |
+          VERSION=$(node -p "require('./package.json').version")
+          if [ "${GITHUB_REF_TYPE}" = "tag" ] && [ "${GITHUB_REF_NAME}" != "${VERSION}" ]; then
+            echo "::error::tag ${GITHUB_REF_NAME} does not match package.json version ${VERSION}; refusing to publish mismatched bytes"
+            exit 1
+          fi
+          echo "VERSION=${VERSION}" >> "${GITHUB_ENV}"
+          echo "VSIX=browser-panel-${VERSION}.vsix" >> "${GITHUB_ENV}"
+          echo "packaging ${VERSION}"
+
+      - run: npm run typecheck
+
+      - run: npm test
+
+      - name: Package
+        run: npx @vscode/vsce package --out "${VSIX}"
+
+      - name: Publish to the Marketplace
+        # --skip-duplicate keeps a re-run after a late failure from dying on the
+        # version it already uploaded; the release step below still runs.
+        run: npx @vscode/vsce publish --oidc --packagePath "${VSIX}" --skip-duplicate
+
+      - name: Extract release notes from the changelog
+        run: |
+          node -e '
+          const fs = require("fs");
+          const md = fs.readFileSync("CHANGELOG.md", "utf8");
+          const head = "## [" + process.env.VERSION + "]";
+          const section = md.split(/\n(?=## )/).find((s) => s.startsWith(head)) || "";
+          const body = section.replace(/^## [^\n]*\n+/, "").trim();
+          fs.writeFileSync("release-notes.md", body);
+          console.log(body ? body.length + " chars of release notes" : "no changelog section for " + process.env.VERSION);
+          '
+
+      - name: Create or update the GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if gh release view "${VERSION}" >/dev/null 2>&1; then
+            gh release upload "${VERSION}" "${VSIX}" --clobber
+          elif [ -s release-notes.md ]; then
+            gh release create "${VERSION}" "${VSIX}" --title "${VERSION}" --notes-file release-notes.md
+          else
+            gh release create "${VERSION}" "${VSIX}" --title "${VERSION}" --generate-notes
+          fi
