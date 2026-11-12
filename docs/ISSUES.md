@@ -26,6 +26,7 @@
 2. [問題二：重新整理箭頭一直旋轉無後續畫面，需加入定時自動重連](#問題二重新整理箭頭一直旋轉無後續畫面需加入定時自動重連)
 3. [問題三：開啟瀏覽器時未自動填入上次連結／點開後一直轉圈](#問題三開啟瀏覽器時未自動填入上次連結點開後一直轉圈)
 4. [影響檔案清單](#影響檔案清單)
+5. [2026-11-13：Google 站台四連修、登入態邊界與複查（v0.4.5）](#2026-11-13google-站台四連修登入態邊界與複查v045)
 
 ---
 
@@ -292,3 +293,54 @@ VS Code webview 內容住在外層 sandboxed iframe（無 `allow-popups`）；HT
 | `docs/PROXY.md` | bounce 機制、崩潰根因、sticky port、撤銷「path-prefix 固有限制/目前不做」記載 |
 | `README.md` | proxy 設定說明與 popup 限制措辭更新 |
 | `CHANGELOG.md` / `package.json` | 0.4.1 / 0.4.2 |
+
+---
+
+## 2026-11-13：Google 站台四連修、登入態邊界與複查（v0.4.5）
+
+> **狀態標記**：已完成。工作區內 0.4.5～0.4.8 四段版本收斂為單一 `0.4.5`。
+> **對象**：`https://antigravity.google.com/u/2/`（單一站台，四個各自獨立的故障）。
+
+### 定案摘要
+
+| # | 議題 | 定案 |
+|---|------|------|
+| 1 | 站台在面板內回 403 | 站台在應用層讀 `Sec-Fetch-Dest`：`iframe`／`frame` → 403，`document`／`empty` → 302→200（`Sec-Fetch-Site`／`Mode` 變動不影響）。代理轉發前只把 `iframe`／`frame` 改寫成 `document`，其餘值不動（`_rewriteSecFetchDest()`）。否決時站台回的是**不帶 `X-Frame-Options`** 的 403 HTML，剝標頭幫不上忙，所以只能改請求。 |
+| 2 | 修完 403 後一直轉圈 | 兩個獨立原因疊加。①`Content-Security-Policy` 的標頭值是**逗號分隔的政策清單**，舊碼只按 `';'` 切，nonce 抬不到 shim 標籤上；②頁面的 `<script crossorigin="anonymous">` 把 CDN bundle 逼進 CORS 模式，同一個檔案回 200 仍被判失敗（`net::ERR_FAILED 200 (OK)`），主 bundle 從未執行。修法：從 `rawHeaders` 取標頭並逐條政策處理（`_splitCspList()` / `_cspPolicies()` / `_cspForShim()` / `_setCspHeader()`）；靜態剝 `crossorigin`（保留 `integrity` 與 `as=font`）＋ shim 覆寫 `crossOrigin` setter 與 `setAttribute('crossorigin')`。 |
+| 3 | 點 Sign in 沒反應 | 頁面上有**兩個**登入元素且失效原因不同。①Google One Bar 的 `<a aria-label="Sign in" target="_top">`：宿主給 webview 的 sandbox 旗標是 `allow-scripts`／`allow-same-origin`／`allow-forms`／`allow-pointer-lock`／`allow-downloads`，**沒有 `allow-top-navigation`、沒有 `allow-popups`**，換頂層文件的導航被瀏覽器**靜默丟棄**；shim 改為「同站的 `_top`／`_parent` 留在面板內導航、跨站交給系統瀏覽器」，特殊 scheme（`javascript:`／`mailto:`／`tel:`／`data:`／`blob:`／`about:`）放行。②中間藍色 `<button class="btn-primary-google">`：站台 `signIn()` 在 `window.location.protocol !== "http:" || !isLocalhost(hostname)` 條件下函式體為空，屬站台自己的 localhost dev 分支。`window.location` 無法偽造（`defineProperty` 拋 `TypeError`，`href` 存取子不可配置），只有 `Location.prototype.assign`／`replace` 包得住，所以 shim 攔不到 `location.href = …`。**列為不可修**，出口是選單的 **Open in external browser**。 |
+| 4 | 面板 Sign in 開到外部瀏覽器變 404 | 宿主 `_doOpenExternal()` 對 `Uri` 物件再跑一次 `encodeURI(uri.toString(true))`，既有的 `%` 轉義被多轉一層：`%3F` → `%253F`，`continue` 參數解出來變成 `https://antigravity.google.com/%3Fpli=1`。字串形態則原樣轉發。修 `_openExternal` 為「先送字串、宿主拒收才退回 `Uri.parse`」。**不採用**「把 `%3F` 還原成 `?`」的補償寫法：那會改動 URL 本體，遇到位元組完全一致的簽名式網址就壞。 |
+| 5 | 在外部瀏覽器登入後，憑證帶不回面板 | 三層各自獨立，只修一層不夠。**L1** 系統瀏覽器 profile 與 webview 的 Electron session 是兩個行程、兩個儲存分區，彼此沒有 API；代理模式下頁面又只有 `http://127.0.0.1:<port>` 一個 origin。**L2** 代理在設計上丟 `Cookie` 與 `Set-Cookie`（HTTP 與 WebSocket 握手兩條路徑都不轉發）：代理 origin 由所有經代理網站共用，轉發會讓不同站台的 session 互染。**L3** 站台自己的 OAuth client 只註冊 `https://antigravity.google.com/`，實測 `redirect_uri` 四格：註冊值回 `interaction_required`、`/u/2/` 回 `redirect_uri_mismatch`、`http://127.0.0.1:<port>/…` 回 `invalid_request`（要求「upgrade to a supported browser」）。**決策：不做 cookie jar**——補 L2 只對伺服器端 session 的普通站台有用，對 L3 的硬否決無效，卻會帶進 domain 衝突、`HttpOnly` 失效、兩站互看 cookie 等新邊界。 |
+| 6 | 手動貼 token 後回 401 | 不是面板限制。貼上的 `ya29…` 是**已過期**的憑證（`expiry_date: 2026-10-27T19:23:24Z`），401 訊息與 `loadCodeAssist` 的原話逐字一致。換新鮮 token 後仍有第二層：`userinfo` 200、`loadCodeAssist` 200 但回 `UNSUPPORTED_CLIENT`、`fetchAvailableModels` 403 `PERMISSION_DENIED`——**帳號層級限制，非本擴充可修**。另外 refresh 不可行（憑證檔缺 `client_secret`，`agy.exe` 內嵌的 secret 全部 `invalid_client`），改交付取 token 的腳本。 |
+
+### 覆核附註
+
+| 項目 | 內容 |
+|------|------|
+| 本檔 #5 的「固定 10 秒」 | 屬 2026-09-18 當下的決定。`e46c124`（`fix: seamless auto-reconnect — no white flash, retry every 5s`）之後為 **5 秒**（`RECONNECT_INTERVAL_SEC = 5`）。兩處都對，只是時間點不同；`README.md` 寫的是現況。 |
+| 本檔「問題三」的 popup 結論 | 直連模式仍不可修（sandbox 無 `allow-popups`）；proxy 模式的 shim 攔截已於本輪覆蓋 `_top`／`_parent`。 |
+
+### 同一輪的複查（無新功能，只收邊界）
+
+| # | 發現 | 處置 |
+|---|------|------|
+| 1 | `src/browserView.ts` 的 `EXTENSION_VERSION` 硬編碼 `0.4.4`，manifest 已是 0.4.8，webview 資源版本參數因此長期送錯 | 刪掉常數，改讀 `this._context.extension?.packageJSON.version`（`_webviewVersion` getter）；`?v=` 只來自 manifest |
+| 2 | `_toTargetPath()` 會把跨站的絕對 URL 折成當前站台的路徑 | 偵測 `scheme://` 且 origin 不同時原樣透傳 |
+| 3 | `_pipeOrInjectHtml()` 對沒有 body 的回應（`HEAD`／`204`／`304`）仍偽造 body 並改寫 `content-length` | 依 `statusCode` 與 method 判定無 body，原樣串流、不注入 shim |
+| 4 | `src/webview/app.js` 四條導航路徑各自複製一份探測與安全網程式碼 | 收斂為 `beginProbe()` 與 `armLoadSafetyNet()`，行為不變 |
+| 5 | `SHIM_JS` 內有編譯器看不到的死碼 `abs(` | 移除；字串改 `export const`，讓測試能 import 並斷言自己的出貨內容 |
+| 6 | 代理規則完全沒有測試，改動只能靠肉眼 | 新增 `test/proxy-units.js`（90 檢查），用專案自己的 esbuild 打包 `src/proxy.ts` 再斷言，測的是出貨碼 |
+
+### 影響檔案清單（2026-11-13，v0.4.5）
+
+| 檔案 | 變更 |
+|------|------|
+| `src/proxy.ts` | `_rewriteSecFetchDest()`；CSP 逐政策處理（`_splitCspList()` / `_cspPolicies()` / `_cspForShim()` / `_setCspHeader()`）；`_stripCrossOrigin()`、`_injectShimTag()`、`_pipeOrInjectHtml(pres, res, target, method)`；`_toTargetPath()` 跨站絕對 URL 透傳；`SHIM_JS` 加 `hrefOf()` / `inPanel()` / `realUrl()`、`_top`／`_parent` 處理、死碼移除、改 `export const` |
+| `src/browserView.ts` | `_openExternal()` 改字串優先；刪 `EXTENSION_VERSION`、加 `_webviewVersion` getter；`_getHtml` 版本參數改讀 manifest |
+| `src/webview/app.js` | `beginProbe()` / `armLoadSafetyNet()` 收斂四條導航路徑 |
+| `test/proxy-units.js` | 新增，90 檢查（`npm test`） |
+| `package.json` | 版本收斂為 `0.4.5`；新增 `test` script；移除失效的 `lint` script（專案未裝 eslint） |
+| `CHANGELOG.md` | 0.4.5～0.4.8 四段合併為單一 `[0.4.5]`；補回重複的 `[0.3.7]` 標題 |
+| `README.md` | 限制條目改寫成使用者語言；proxy 開／關的登入語意分開寫；建置區塊加 `npm test` |
+| `docs/PROXY.md` | 改為按機制組織（兩道閘門、URL 形態、請求頭、回應頭、shim、`crossorigin`、登入態、外部開啟、仍做不到的、測試） |
+| `docs/PROXY-HISTORY.md` | 新增，保存 2026-08-22 與 2026-10-29 兩次調查的原文 |
+| `docs/ISSUES.md` | 本節（2026-11-13 追加） |

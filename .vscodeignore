@@ -6,4 +6,6 @@ esbuild.js
 tsconfig.json
 node_modules/**
 .gitignore
+.firecrawl/**
+.github/**
 **/*.map

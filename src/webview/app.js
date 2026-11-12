@@ -265,6 +265,32 @@ import { svgIcon } from './icons.js';
 		lastShimUrl = '';
 	}
 
+	/**
+	 * Arm the reachability probe for `u`; the host's `urlStatus` reply is matched
+	 * back by pendingCheck. Every navigation path needs exactly this bookkeeping,
+	 * so it lives in one place.
+	 */
+	function beginProbe(u) {
+		pendingCheck = { id: ++checkSeq, url: u };
+		vscode.postMessage({ type: 'checkUrl', url: u });
+	}
+
+	/**
+	 * Safety net for the "connecting" state: if the probe verdict arrives but the
+	 * iframe never fires 'load' (some page keeps a subresource hanging — common
+	 * with dev servers), stop the spinner anyway. Never reveals or hides anything:
+	 * the probe verdict remains the only thing that decides what the user sees.
+	 */
+	function armLoadSafetyNet(u) {
+		clearTimeout(loadTimer);
+		loadTimer = setTimeout(() => {
+			if (nav.current === u && !closed) {
+				stopConnecting();
+				stopLoading();
+			}
+		}, 20000);
+	}
+
 	function clearFrameSrc() {
 		frameSrcSeq++;
 		resetLoadTracking();
@@ -417,9 +443,7 @@ import { svgIcon } from './icons.js';
 		}
 		reconnectAttemptPending = true;
 		setFrameSrc(toProxyUrl(u));
-		const id = ++checkSeq;
-		pendingCheck = { id, url: u };
-		vscode.postMessage({ type: 'checkUrl', url: u });
+		beginProbe(u);
 		clearTimeout(loadTimer);
 		// Safety net: if the attempt neither loads nor gets a probe response,
 		// allow the next scheduled retry to proceed.
@@ -476,24 +500,9 @@ import { svgIcon } from './icons.js';
 		updateButtons();
 		btnReload.classList.add('loading');
 		showConnecting();
-		const id = ++checkSeq;
-		pendingCheck = { id, url: u };
-		vscode.postMessage({ type: 'checkUrl', url: u });
+		beginProbe(u);
 		vscode.postMessage({ type: 'setClosed', closed: false }); // opening clears the closed flag
-		// Safety net: if the probe passed but the iframe never fires 'load' (some page
-		// keeps a resource hanging — common with dev servers), just stop the connecting
-		// bar. Never show an error page: the page may be rendering fine (false positive).
-		clearTimeout(loadTimer);
-		loadTimer = setTimeout(() => {
-			// Safety net: the probe passed or its response was lost, and the iframe
-			// load never settled (a page hanging on a subresource) — stop the
-			// connecting bar so the UI doesn't spin forever. Never reveals or hides
-			// anything: the probe verdict (whenever it arrives) still decides.
-			if (nav.current === u && !closed) {
-				stopConnecting();
-				stopLoading();
-			}
-		}, 20000);
+		armLoadSafetyNet(u);
 	}
 
 	function navigate(url, { record = true } = {}) {
@@ -575,20 +584,8 @@ import { svgIcon } from './icons.js';
 		warnProxyAuth(u);
 		btnReload.classList.add('loading');
 		showConnecting();
-		const id = ++checkSeq;
-		pendingCheck = { id, url: u };
-		vscode.postMessage({ type: 'checkUrl', url: u });
-		clearTimeout(loadTimer);
-		loadTimer = setTimeout(() => {
-			// Safety net: the probe passed or its response was lost, and the iframe
-			// load never settled (a page hanging on a subresource) — stop the
-			// connecting bar so the UI doesn't spin forever. Never reveals or hides
-			// anything: the probe verdict (whenever it arrives) still decides.
-			if (nav.current === u && !closed) {
-				stopConnecting();
-				stopLoading();
-			}
-		}, 20000);
+		beginProbe(u);
+		armLoadSafetyNet(u);
 	}
 
 	/**
@@ -673,8 +670,7 @@ import { svgIcon } from './icons.js';
 		// No probe covers this load (an in-frame navigation the panel didn't
 		// initiate). Start one — it is the only failure detector we have for
 		// what actually rendered.
-		pendingCheck = { id: ++checkSeq, url };
-		vscode.postMessage({ type: 'checkUrl', url });
+		beginProbe(url);
 	});
 
 	// ---------------------------------------------------------------------------

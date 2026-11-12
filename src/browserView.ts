@@ -47,8 +47,6 @@ interface HistoryPickItem extends vscode.QuickPickItem {
 const HISTORY_KEY = 'browser.history';
 const LAST_URL_KEY = 'browser.lastUrl';
 const CLOSED_KEY = 'browser.closed';
-// Keep in sync with package.json — used for webview resource cache-busting.
-const EXTENSION_VERSION = '0.4.4';
 
 export class BrowserViewProvider implements vscode.WebviewViewProvider {
 	public static readonly viewType = 'browser.view';
@@ -141,13 +139,20 @@ export class BrowserViewProvider implements vscode.WebviewViewProvider {
 		};
 	}
 
+	/** Extension version for webview cache-busting (never hand-maintain this). */
+	private get _webviewVersion(): string {
+		const version = (this._context.extension?.packageJSON as { version?: unknown } | undefined)?.version;
+		return typeof version === 'string' && version ? version : '0';
+	}
+
 	private _getHtml(webview: vscode.Webview): string {
 		try {
 			const webviewDir = vscode.Uri.joinPath(this._context.extensionUri, 'dist', 'webview');
 			// Version query busts the webview's resource cache: without it an
 			// extension update could keep serving the previous app.js/index.html
-			// (stale script + fresh host contract = broken/blank panel).
-			const v = '?v=' + EXTENSION_VERSION;
+			// (stale script + fresh host contract = broken/blank panel). Read from
+			// the manifest, so it can never drift from the published version.
+			const v = '?v=' + this._webviewVersion;
 			const scriptUri = webview.asWebviewUri(vscode.Uri.joinPath(webviewDir, 'app.js')).toString() + v;
 			const styleUri = webview.asWebviewUri(vscode.Uri.joinPath(webviewDir, 'styles.css')).toString() + v;
 
@@ -294,7 +299,8 @@ export class BrowserViewProvider implements vscode.WebviewViewProvider {
 			const target = sel as HistoryPickItem;
 			if (target.clearAll) {
 				// Same contract as the clearStorage message (also clears lastUrl and
-				// notifies the webview); keep the picker open as before.
+				// notifies the webview). The picker itself is already disposed above, so
+				// re-opening it is the user's call — this is a one-shot clear.
 				void this._clearStorage();
 				return;
 			}
@@ -345,7 +351,7 @@ export class BrowserViewProvider implements vscode.WebviewViewProvider {
 				// Only http/https: the relay is fed by embedded pages, so other schemes
 				// (file:, vscode:, custom protocol handlers) must never reach openExternal.
 				if (msg.url && /^https?:\/\//i.test(msg.url)) {
-					void vscode.env.openExternal(vscode.Uri.parse(msg.url));
+					await this._openExternal(msg.url);
 				}
 				break;
 			case 'copyText':
@@ -478,6 +484,29 @@ export class BrowserViewProvider implements vscode.WebviewViewProvider {
 				resolve({ ok: false, error: err.message });
 			});
 		});
+	}
+
+	/**
+	 * Hands a URL to the OS without letting the host re-encode it.
+	 *
+	 * The host's OpenerService takes one of two branches (read out of this IDE's
+	 * workbench.desktop.main.js): a *string* target is forwarded verbatim, while a
+	 * *Uri* target is forwarded as `encodeURI(uri.toString(true))`. `encodeURI()`
+	 * escapes '%' itself, so every percent escape in the URL gains one level.
+	 * Measured on the sign-in link Google's One Bar puts on the target page:
+	 *   string target -> `continue=…%3Fpli=1`   -> after sign-in 200 (the real site)
+	 *   Uri target    -> `continue=…%253Fpli=1` -> after sign-in 404 at /%3Fpli=1
+	 * `openExternal` is typed as Uri-only, but the runtime accepts a string; keep the
+	 * typed form as a fallback for hosts that reject one.
+	 */
+	private async _openExternal(url: string): Promise<void> {
+		try {
+			await vscode.env.openExternal(url as unknown as vscode.Uri);
+			return;
+		} catch {
+			// Host refused a string target; fall back to the typed (re-encoding) form.
+		}
+		await vscode.env.openExternal(vscode.Uri.parse(url));
 	}
 
 	private async _openDevtools(): Promise<void> {

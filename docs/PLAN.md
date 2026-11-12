@@ -294,7 +294,7 @@ vscode.window.registerWebviewViewProvider('browser.view', provider, {
 
 ### 7.19 本地代理解除 frame 封鎖（`browser.proxyEnabled`）
 
-**已實作。** 事故與現況見 `docs/PROXY.md`（2026-08-22 閃爍修復）。
+**已實作。** 事故與現況見 `docs/PROXY-HISTORY.md`（2026-08-22 閃爍修復）；現行規則與判據見 `docs/PROXY.md`。
 
 **目的**：讓送出 `X-Frame-Options` / CSP `frame-ancestors` 的網站能在 iframe 內顯示（否則白畫面，§9）。這是通用反向代理，不是 Next.js 專用。
 

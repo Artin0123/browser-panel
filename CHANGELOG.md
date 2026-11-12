@@ -1,5 +1,43 @@
 # Changelog
 
+## [0.4.5] - 2026-11-13
+
+> One site — `https://antigravity.google.com/u/2/` with `browser.proxyEnabled` — exposed every defect below inside a single unreleased cycle: the page answered **403**, then spun forever, then its sign-in did nothing, then the browser it opened landed on a **404**. The proxy is generic, so each fix applies to any site with the same gate.
+
+### Fixed
+
+- Proxy: **pages render when the site vetoes framing server-side from `Sec-Fetch-Dest`.** Stripping `X-Frame-Options` and `frame-ancestors` only defeats the browser-side check; such a site answers `iframe`/`frame` with an ordinary HTML 403 that carries no framing header, so the browser paints it inside the frame. The proxy maps `iframe`/`frame` → `document` upstream and leaves every other destination alone. Measured: `document` and `empty` get 302 → 200, while `Sec-Fetch-Site` and `-Mode` change nothing.
+
+- Proxy: **the injected shim survives a multi-policy CSP, and CDN bundles load at all.** Two unrelated gates: a `Content-Security-Policy` value is a comma-separated list of independently enforced policies, so a page whose nonce policy sat after the comma lost its nonce to the *other* policy; and `crossorigin="anonymous"` on the site's own bundles forced CORS that the CDN only grants to the site's real origin, so a 200 answered as `ERR_FAILED`. Policies are now taken from `rawHeaders`, split on commas, and adapted one by one (lift a shared nonce, else append `'self'` to the existing directive), and the attribute is dropped in HTML and by the shim for elements the page creates later. `integrity` tags and font preloads stay as they are.
+
+- Proxy: **`target="_top"` / `_parent` links respond to clicks.** The webview sandbox carries no `allow-top-navigation`, so the browser drops those navigations silently — no error, nothing the page can observe. The shim now follows a same-site target inside the panel (rewriting absolute hrefs into proxy form first) and hands a foreign one to the system browser.
+
+- Proxy: **a link opened in the system browser keeps its bytes.** The host re-encodes a `Uri` target with `encodeURI`, so `%3F` became `%253F` and a sign-in through `continue=` landed on a 404. The URL is relayed as a string, with the typed `Uri` as fallback.
+
+- Proxy: **popups open the real site, not a dead `127.0.0.1` link.** `window.open` and relative `_blank` hrefs resolve against the proxy origin; the shim maps both proxied forms back to the target URL before relaying.
+
+### Changed
+
+- Extension host: the webview's `?v=` cache-busting version is read from the manifest instead of a hand-maintained constant, which had already drifted from it.
+
+- Proxy: responses with no body (`HEAD`, `204`, `304`) bypass shim injection, which would otherwise fabricate a body and rewrite `content-length` to the tag's size.
+
+- Proxy: a `Next-Url` value pointing at another origin is forwarded verbatim instead of being folded into a path on the current site.
+
+- Proxy: removed a dead helper from the shim; `npm test` now compiles that string, so a stray concatenation cannot ship.
+
+- Webview: the probe bookkeeping and the 20 s load safety net live in `beginProbe()` / `armLoadSafetyNet()` instead of four copies.
+
+- Tests: `npm test` runs `test/proxy-units.js` — 90 checks over the rules that each caused a field bug (CSP policy lists and nonce lifting, `crossorigin` stripping, shim injection points, `Sec-Fetch-Dest`, open-proxy rejection, `Next-Url`/`Referer` mapping, cache-poisoning headers, redirect rewriting). It bundles the shipped `src/proxy.ts` with the project's own esbuild.
+
+### Docs
+
+- `docs/PROXY.md` organized by mechanism — two framing gates, URL form, request headers, response headers, the shim, `crossorigin`, login state, external open — with the measurement behind each rule and the gaps that remain. `README.md` limitations kept to user-facing statements; `docs/ISSUES.md` reduced to decisions and open gaps.
+
+### Investigated (not a proxy bug, and not fixable from the shim)
+
+The big blue Sign in button on `antigravity.google.com` stays inert: the site's own `signIn()` runs only when the page is not on http/localhost, and every proxied page is served from `http://127.0.0.1:<port>`, so it takes the development branch and the function body is empty. `window.location` cannot be forged (redefining it throws; the `href` accessor is not configurable), so `location.href = …` is out of the shim's reach. Use **Open in external browser**.
+
 ## [0.4.4] - 2026-11-03
 
 ### Fixed
@@ -136,11 +174,11 @@
 - Added navigation diagnostics to the webview console to identify the remaining proxy-mode reload loop
 
 ## [0.3.7] - 2026-08-22
-## [0.3.7] - 2026-08-22
 
 ### Fixed
 
 - **Endless reload loop with the proxy on** (e.g. Next.js apps): ① the proxy now forwards **WebSocket upgrades** (dev-server HMR) to the target instead of failing them — Next.js's dev client was reloading the page on WS failure; ② `applyProxy` runs are now serialized and `start()` disposes any previous server, so concurrent config events can't leak servers / change the port / trigger endless re-routing
+
 ## [0.3.6] - 2026-08-22
 
 ### Fixed

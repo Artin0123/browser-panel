@@ -10,6 +10,10 @@ import * as zlib from 'zlib';
  * - Only binds to 127.0.0.1.
  * - Strips X-Frame-Options / CSP frame-ancestors, rewrites Origin/Referer so the
  *   target sees the page as same-origin, rewrites redirects through the proxy.
+ * - Rewrites `Sec-Fetch-Dest: iframe|frame` to `document`, because app servers can
+ *   veto framing server-side from that header alone and answer with an HTML 403
+ *   page that carries no XFO (so the browser renders it inside the frame). Strip-
+ *   ping XFO alone was therefore not enough — see _rewriteSecFetchDest.
  * - Forwards request headers (not a tiny allow-list). SPAs (Next.js RSC, Vite,
  *   etc.) send custom headers; dropping them makes the client treat the response
  *   as a full document and reload-loop. See docs/PROXY.md.
@@ -37,7 +41,8 @@ const HTML_INJECT_MAX_BYTES = 5 * 1024 * 1024;
 
 /**
  * Served at /p/<token>/__bp_shim.js and referenced from injected script tags.
- * Bridges window.open / target=_blank and clipboard failures to the parent webview,
+ * Bridges window.open / target=_blank / target=_top(_parent) and clipboard
+ * failures to the parent webview,
  * and reports the document's real URL back to the parent (an iframe's src
  * attribute is NOT updated by in-frame navigations, so without these reports the
  * webview cannot track link clicks/redirects — breaking back/forward, the URL
@@ -47,13 +52,57 @@ const HTML_INJECT_MAX_BYTES = 5 * 1024 * 1024;
  * URL-encoded): the target origin for root-relative documents, and the proxy
  * prefix to detect the explicit /p/<token>/... document form. A separate inline
  * bootstrap would be blocked by nonce-based CSPs; the query is not.
+ *
+ * The shim also neutralizes `crossorigin` on script/link elements (descriptor
+ * setters + setAttribute). Sites that fetch their own bundles from a CDN with
+ * `crossorigin="anonymous"` — Google's boq/jetski loader does exactly this —
+ * require an Access-Control-Allow-Origin for the PROXY origin, which the CDN
+ * gives only to the site's own origin; the load then fails even though the CDN
+ * answered 200, and the app never boots (observed: antigravity.google.com spun
+ * forever with 'No Access-Control-Allow-Origin' on www.gstatic.com bundles).
+ * A classic script needs no CORS grant at all, so dropping the attribute makes
+ * the very same URL load. Elements parsed from HTML are handled in the proxy
+ * (_stripCrossOrigin); this hook covers the ones the page creates later.
  */
-const SHIM_JS =
+export const SHIM_JS =
 	'(function(){' +
 	'var bp={};try{bp=JSON.parse(new URL(document.currentScript.src).searchParams.get("bp")||"{}")}catch(e){}' +
-	'function abs(u){try{return new URL(u,location.href).href}catch(e){return null}}' +
 	'function send(t,p){try{parent.postMessage(Object.assign({type:t},p),"*")}catch(e){}}' +
-	'function openExt(u){var a=abs(u);if(a)send("openExternal",{url:a})}' +
+	'function openExt(u){var a=realUrl(u);if(a)send("openExternal",{url:a})}' +
+	'function hrefOf(a){' +
+	'try{var h=a.href;if(typeof h==="string"&&h)return h}catch(e){}' +
+	'var r=a.getAttribute&&a.getAttribute("href");' +
+	'try{return r?new URL(r,document.baseURI||location.href).href:null}catch(e){return null}' +
+	'}' +
+	// Rewrites a URL that is already in its proxied form back to the real site
+	// URL — handing a proxy URL to a real browser is a dead link once the panel
+	// stops. A bounced document's own relative links (the usual case) resolve
+	// against the proxy origin, so their path belongs to the target site.
+	'function realUrl(u){' +
+	'var x;try{x=new URL(u,location.href)}catch(e){return null}' +
+	'if(x.origin!==location.origin)return x.href;' +
+	'var p=bp.prefix||"";' +
+	'if(p&&x.pathname.lastIndexOf(p,0)===0){' +
+	'var r=x.pathname.slice(p.length).split("/");' +
+	'if(r.length>=2&&r[0]&&r[1])return r[0]+"://"+r[1]+(r.length>2?"/"+r.slice(2).join("/"):"/")+x.search+x.hash' +
+	'}' +
+	'if(bp.origin)return bp.origin+x.pathname+x.search+x.hash;' +
+	'return x.href' +
+	'}' +
+	// Rewrites a URL into its proxied form so following it stays in the panel:
+	// panel: URLs already on the proxy origin pass through untouched, the target
+	// site's own absolute URLs become /p/<token>/<scheme>/<host>/<path> (a
+	// same-site link's absolute href would otherwise send the frame straight to
+	// the real host, where X-Frame-Options blocks framing). null = another site.
+	'function inPanel(u){' +
+	'if(!u)return null;' +
+	'try{var x=new URL(u,location.href);' +
+	'if(x.origin===location.origin)return x.href;' +
+	'if(bp.origin&&x.origin===bp.origin&&bp.prefix)' +
+	'return location.origin+bp.prefix+x.protocol.slice(0,-1)+"/"+x.host+x.pathname+x.search+x.hash' +
+	'}catch(e){}' +
+	'return null' +
+	'}' +
 	'function reportUrl(){' +
 	'var p=location.pathname;' +
 	'var u=(bp.prefix&&p.lastIndexOf(bp.prefix,0)===0)?location.href:((bp.origin||location.origin)+p+location.search+location.hash);' +
@@ -67,9 +116,26 @@ const SHIM_JS =
 	'try{var rs=history.replaceState;history.replaceState=function(){var r=rs.apply(this,arguments);setTimeout(reportUrl,0);return r};}catch(e){}' +
 	'window.open=function(u){if(u)openExt(u);return null};' +
 	'document.addEventListener("click",function(e){' +
-	'var t=e.target;while(t&&t.tagName!=="A")t=t.parentElement;if(!t)return;' +
+	'var t=e.target;while(t&&String(t.tagName).toUpperCase()!=="A")t=t.parentElement;if(!t)return;' +
 	'var g=(t.getAttribute("target")||"").toLowerCase();' +
-	'if(g==="_blank"||g==="_new"){e.preventDefault();e.stopPropagation();openExt(t.href)}' +
+	'if(g==="_blank"||g==="_new"){e.preventDefault();e.stopPropagation();openExt(hrefOf(t));return}' +
+	// target=_top / _parent asks to break out of the frame. The webview iframe is
+	// sandboxed without allow-top-navigation (read out of the installed IDE's
+	// workbench.desktop.main.js: allow-scripts, allow-same-origin, allow-forms,
+	// allow-pointer-lock, allow-downloads), so the browser drops that navigation
+	// silently — the click simply looks dead. Google's One Bar "Sign in"
+	// (accounts.google.com/ServiceLogin, target=_top) on antigravity.google.com is
+	// exactly that case. Emulate the intent instead: the same site opens in the
+	// panel (the panel IS the browsing surface here), another site leaves for a
+	// real browser, where its own cookies and its own session actually work.
+	'if(g==="_top"||g==="_parent"){' +
+	'var raw=t.getAttribute("href")||"";' +
+	'if(/^(javascript|mailto|tel|data|blob|about):/i.test(raw))return;' +
+	'var u=hrefOf(t);if(!u)return;' +
+	'var p=inPanel(u);' +
+	'if(p){e.preventDefault();e.stopPropagation();location.href=p}' +
+	'else if(/^https?:/i.test(u)){e.preventDefault();e.stopPropagation();openExt(u)}' +
+	'}' +
 	'},true);' +
 	'try{if(navigator.clipboard&&navigator.clipboard.writeText){' +
 	'var w=navigator.clipboard.writeText.bind(navigator.clipboard);' +
@@ -77,7 +143,27 @@ const SHIM_JS =
 	'return w(text).catch(function(){send("copy",{text:String(text)});return Promise.resolve()})' +
 	'}}' +
 	'}catch(e){}' +
-	'})();';
+	// Drop cross-origin mode from scripts/links the page creates: the CDN grants
+	// CORS to the site's real origin, never to the proxy origin, so a CORS-mode
+	// load fails with ERR_FAILED 200 (OK). Classic/no-cors needs no grant.
+	// Elements carrying `integrity` keep the real setter — SRI over an opaque
+	// (no-cors) response always fails, so for those the original behavior is the
+	// better bet (best-effort: the check reads integrity at call time, so a page
+	// that assigns crossorigin BEFORE integrity still loses CORS mode).
+	'try{' +
+	'var keepCors=function(el){try{return !!(el&&el.getAttribute&&el.getAttribute("integrity"))}catch(e){return true}};' +
+	'["HTMLScriptElement","HTMLLinkElement"].forEach(function(n){' +
+	'var c=window[n];if(!c)return;' +
+	'var d=Object.getOwnPropertyDescriptor(c.prototype,"crossOrigin");' +
+	'if(d&&d.set)Object.defineProperty(c.prototype,"crossOrigin",{configurable:true,enumerable:d.enumerable,get:d.get,set:function(v){if(keepCors(this))return d.set.call(this,v)}})' +
+	'});' +
+	'var sa=Element.prototype.setAttribute;' +
+	'Element.prototype.setAttribute=function(n,v){' +
+	'if(this&&(this.tagName==="SCRIPT"||this.tagName==="LINK")&&String(n).toLowerCase()==="crossorigin"&&!keepCors(this))return;' +
+	'return sa.apply(this,arguments)' +
+	'};' +
+	'}catch(e){}' +
+	'})();';;
 
 const DROP_REQUEST_HEADERS = new Set([
 	'connection',
@@ -291,6 +377,12 @@ export class FrameProxy {
 				return parsed.url.pathname + parsed.url.search;
 			}
 			if (!u.pathname.startsWith('/p/')) {
+				// A foreign absolute URL is neither proxy space nor this target's: keep
+				// it verbatim instead of folding it into a path on the current site
+				// (that would silently rewrite another host's URL into this one's).
+				if (/^[a-zA-Z][a-zA-Z0-9+.-]*:\/\//.test(value) && u.origin !== fallback.url.origin) {
+					return value;
+				}
 				return u.pathname + u.search;
 			}
 		} catch {
@@ -338,6 +430,7 @@ export class FrameProxy {
 		// Chromium may offer zstd which we otherwise serve back as garbage.
 		headers['accept-encoding'] = ACCEPT_ENCODING;
 		this._rewriteOrigin(headers, target);
+		this._rewriteSecFetchDest(headers);
 		// Next.js (and similar) send the current page URL in Next-Url; it must be
 		// the target path, not /p/<token>/..., or the router disagrees with itself.
 		const nextUrl = headers['next-url'];
@@ -345,6 +438,42 @@ export class FrameProxy {
 			headers['next-url'] = this._toTargetPath(nextUrl, target);
 		}
 		return headers;
+	}
+
+	/**
+	 * Server-side anti-framing bypass.
+	 *
+	 * Stripping `X-Frame-Options` / `frame-ancestors` only defeats the *browser-side*
+	 * framing veto. Some sites veto framing in the app server instead, purely from
+	 * `Sec-Fetch-Dest`, which the browser computes and we otherwise forward verbatim
+	 * — so a framed document gets an HTML error page that the browser happily renders
+	 * inside the frame (it carries no XFO either).
+	 *
+	 * Measured against Google's properties (antigravity.google.com, 2026-11-12), with
+	 * Origin/Referer already rewritten by _rewriteOrigin:
+	 *   dest=iframe  (site=cross-site | same-origin | none) -> 403 "That's an error"
+	 *   dest=frame   (site=cross-site)                      -> 403
+	 *   dest=document(site=cross-site | same-origin | none) -> 302/200
+	 *   dest=empty   (site=cross-site)                      -> 302/200
+	 * Only `Sec-Fetch-Dest` discriminates: `Sec-Fetch-Site`/`-Mode` were varied
+	 * independently and changed nothing, so they are deliberately left untouched
+	 * (rewriting them would misdescribe subresource loads, which never use the
+	 * frame destinations).
+	 *
+	 * VS Code webviews really do send dest=iframe for the document here — which is
+	 * why proxy mode still showed Google's 403 page in the field, not ours.
+	 */
+	private _rewriteSecFetchDest(headers: http.OutgoingHttpHeaders): void {
+		const dest = headers['sec-fetch-dest'];
+		if (typeof dest !== 'string') {
+			return;
+		}
+		const d = dest.trim().toLowerCase();
+		// Nested-document destinations are the framed ones. `empty` (the send XHR /
+		// Electron navigation case) and `document` already pass, so they are left as-is.
+		if (d === 'iframe' || d === 'frame') {
+			headers['sec-fetch-dest'] = 'document';
+		}
 	}
 
 	/**
@@ -433,17 +562,25 @@ export class FrameProxy {
 				continue;
 			}
 			if (lk === 'content-security-policy') {
-				const cleaned = (Array.isArray(v) ? v.join('; ') : String(v))
-					.split(';')
-					.map((d) => d.trim())
-					.filter((d) => !/^frame-ancestors\b/i.test(d))
-					.join('; ');
-				if (cleaned) {
-					outHeaders[k] = cleaned;
-				}
-				continue;
+				continue; // multi-policy aware handling after the loop
 			}
 			outHeaders[k] = v;
+		}
+
+		// A CSP header VALUE is a comma-separated LIST OF POLICIES, each enforced
+		// independently (CSP3 §policy delivery), and upstreams commonly send
+		// several policies — Google's product pages send one with a nonce for
+		// scripts and a second carrying require-trusted-types-for. Node collapses
+		// duplicate headers into one ', '-joined string, so the policy structure
+		// has to be recovered by splitting on ',' as well as on ';'; treating it
+		// as a single policy makes a `script-src` sitting after a comma invisible
+		// (its nonce then never reaches the shim tag, and the nonce-only policy
+		// blocks the shim (the field bug: a nonce-only policy sitting after the
+		// comma hid its script-src from the single-policy parser, so the shim was
+		// blocked even though the tag carried the right nonce).
+		const cspPolicies = this._cspPolicies(pres);
+		if (cspPolicies.length > 0) {
+			FrameProxy._setCspHeader(outHeaders, cspPolicies);
 		}
 
 		// The proxy origin is SHARED across every site served through it: a
@@ -515,65 +652,122 @@ export class FrameProxy {
 	}
 
 	/**
-	 * Make room for the shim in the page's own CSP and lift a nonce if one
-	 * exists. Without this, pages with a strict script-src (nonce / allowlist —
-	 * typical for auth providers) block the shim entirely: popups stop being
-	 * intercepted and the webview loses URL tracking. Rules (verified against
-	 * Chromium):
-	 * - script-src with a nonce: leave the policy untouched, return the nonce
-	 *   (a nonce'd external script is allowed, also under 'strict-dynamic').
-	 * - otherwise append 'self' to script-src when missing — a host source is
-	 *   what authorizes EXTERNAL scripts (hash sources do not: they only match
-	 *   inline content, verified), and Chromium ignores 'none' when it is
-	 *   combined with other sources, so 'none' policies open up too. 'self'
-	 *   means the document's own origin, which behind the proxy IS the proxy
-	 *   origin the shim is served from. Loosening to same-origin adds no
-	 *   attacker power: same-origin script content comes from the same target
-	 *   server that already controls the page body.
-	 * - no script-src but a default-src: a nonce there also authorizes a
-	 *   nonce'd external script (default-src governs scripts when script-src is
-	 *   absent) — reuse it and leave the policy untouched. Otherwise append
-	 *   'self' to default-src (NOT a new script-src directive: that would
-	 *   override default-src and strip e.g. its 'unsafe-inline' from the
-	 *   page's own inline scripts).
+	 * Write the policy list onto the outgoing headers, keeping the policies
+	 * separate. Node emits one header line per array element; should a runtime
+	 * join them with ', ' instead, that is equally valid — browsers split a CSP
+	 * header value on commas into separate policies.
 	 */
-	private _cspForShim(csp: string): { csp: string; nonce: string } {
-		const src = (csp || '').trim();
-		if (!src) {
-			return { csp: src, nonce: '' };
+	private static _setCspHeader(outHeaders: http.OutgoingHttpHeaders, policies: string[]): void {
+		if (policies.length === 1) {
+			outHeaders['content-security-policy'] = policies[0];
+			return;
 		}
-		const directives = src.split(';').map((d) => d.trim()).filter((d) => d.length > 0);
-		const scriptIdx = directives.findIndex((d) => /^script-src(\s|$)/i.test(d));
-		if (scriptIdx !== -1) {
-			const values = directives[scriptIdx].split(/\s+/);
-			const nonceTok = values.find((v) => /^'nonce-[^']+'$/i.test(v));
-			if (nonceTok) {
-				// Strip the surrounding quotes; keep only token-safe characters.
-				const nonce = nonceTok.slice(7, -1).replace(/[^A-Za-z0-9+/=_-]/g, '');
-				return { csp: src, nonce };
-			}
-			if (!values.some((v) => /^'self'$/i.test(v))) {
-				directives[scriptIdx] += " 'self'";
-				return { csp: directives.join('; '), nonce: '' };
-			}
-			return { csp: src, nonce: '' };
-		}
-		const defaultIdx = directives.findIndex((d) => /^default-src(\s|$)/i.test(d));
-		if (defaultIdx !== -1) {
-			const values = directives[defaultIdx].split(/\s+/);
-			const nonceTok = values.find((v) => /^'nonce-[^']+'$/i.test(v));
-			if (nonceTok) {
-				const nonce = nonceTok.slice(7, -1).replace(/[^A-Za-z0-9+/=_-]/g, '');
-				return { csp: src, nonce };
-			}
-			if (!values.some((v) => /^'self'$/i.test(v))) {
-				directives[defaultIdx] += " 'self'";
-				return { csp: directives.join('; '), nonce: '' };
+		(outHeaders as Record<string, http.OutgoingHttpHeader>)['content-security-policy'] = policies;
+	}
+
+	/** Normalize one or more CSP header values into individual policies. */
+	private static _splitCspList(value: string | string[] | number | undefined | null): string[] {
+		const raw = Array.isArray(value) ? value : [value ?? ''];
+		const out: string[] = [];
+		for (const v of raw) {
+			for (const p of String(v).split(',')) {
+				const t = p.trim();
+				if (t) out.push(t);
 			}
 		}
-		// No script-src, and default-src either absent or already allowing
-		// same-origin: the shim loads as-is.
-		return { csp: src, nonce: '' };
+		return out;
+	}
+
+	/**
+	 * Collect every policy the upstream sent, minus frame-ancestors (which the
+	 * proxy strips elsewhere: it is the frame-blocking gate this extension
+	 * exists to work around). rawHeaders keeps repeated headers apart; the
+	 * comma split then recovers policies that were packed into one value.
+	 */
+	private _cspPolicies(pres: http.IncomingMessage): string[] {
+		const values: string[] = [];
+		const raw = pres.rawHeaders || [];
+		for (let i = 0; i + 1 < raw.length; i += 2) {
+			if (raw[i].toLowerCase() === 'content-security-policy') {
+				values.push(raw[i + 1]);
+			}
+		}
+		if (values.length === 0) {
+			const v = pres.headers['content-security-policy'];
+			if (typeof v === 'string') values.push(v);
+			else if (Array.isArray(v)) values.push(...v);
+		}
+		return FrameProxy._splitCspList(values)
+			.map((p) =>
+				p
+					.split(';')
+					.map((d) => d.trim())
+					.filter((d) => d.length > 0 && !/^frame-ancestors\b/i.test(d))
+					.join('; ')
+			)
+			.filter((p) => p.length > 0);
+	}
+
+	/**
+	 * Make room for the shim in EVERY policy the page enforces, and lift a nonce
+	 * when one is usable. Without this, pages with a strict script-src (nonce /
+	 * allowlist — typical for auth providers and Google products) block the shim
+	 * entirely: popups stop being intercepted, URL tracking stops, and the
+	 * cross-origin fix in the shim never runs. Rules (verified against
+	 * Chromium):
+	 * - Within ONE policy only the FIRST script-src (else the first default-src,
+	 *   which governs scripts when script-src is absent) counts; later repeats
+	 *   are ignored. Each policy is handled on its own, because all of them are
+	 *   enforced and our script must satisfy every one.
+	 * - A policy that already allows 'self', or that restricts neither directive,
+	 *   needs no change. 'self' is the document's own origin, which behind the
+	 *   proxy IS the proxy origin the shim is served from; loosening to
+	 *   same-origin adds no attacker power, since same-origin script content
+	 *   comes from the same target server that already controls the page body.
+	 * - A closed policy with a nonce is left untouched and the nonce is reused on
+	 *   the shim tag (works under 'strict-dynamic' too). A single tag holds a
+	 *   single nonce, so this is only possible when every closed policy shares
+	 *   the same nonce; otherwise every closed policy gets 'self' appended
+	 *   instead (a host source is what authorizes EXTERNAL scripts; hash sources
+	 *   only match inline content, and Chromium ignores 'none' when combined).
+	 * - Appending goes to the directive that is already there — never a new
+	 *   script-src when only default-src exists, as that would override
+	 *   default-src and drop e.g. its 'unsafe-inline' for the page's own scripts.
+	 */
+	private _cspForShim(policies: string[]): { policies: string[]; nonce: string } {
+		const isSelf = (v: string): boolean => /^'self'$/i.test(v);
+		const nonceOf = (values: string[]): string => {
+			const tok = values.find((v) => /^'nonce-[^']+'$/i.test(v));
+			return tok ? tok.slice(7, -1).replace(/[^A-Za-z0-9+/=_-]/g, '') : '';
+		};
+		const parsed = policies.map((policy) => {
+			const directives = policy.split(';').map((d) => d.trim()).filter((d) => d.length > 0);
+			const scriptIdx = directives.findIndex((d) => /^script-src(\s|$)/i.test(d));
+			const target =
+				scriptIdx !== -1 ? scriptIdx : directives.findIndex((d) => /^default-src(\s|$)/i.test(d));
+			return { directives, target };
+		});
+		// Policies that would reject the shim as things stand.
+		const closed = parsed.filter(
+			(p) => p.target !== -1 && !p.directives[p.target].split(/\s+/).some(isSelf)
+		);
+		const nonces = new Set(closed.map((p) => nonceOf(p.directives[p.target].split(/\s+/))));
+		const sharedNonce = nonces.size === 1 && !nonces.has('') ? [...nonces][0] : '';
+		const out = parsed.map((p) => {
+			if (p.target === -1) {
+				return p.directives.join('; '); // this policy restricts nothing relevant
+			}
+			const values = p.directives[p.target].split(/\s+/);
+			if (values.some(isSelf)) {
+				return p.directives.join('; ');
+			}
+			if (sharedNonce && nonceOf(values) === sharedNonce) {
+				return p.directives.join('; '); // satisfied by the nonce on the tag
+			}
+			p.directives[p.target] += " 'self'";
+			return p.directives.join('; ');
+		});
+		return { policies: out, nonce: sharedNonce };
 	}
 
 	/** Shim script URL carrying the per-document target mapping in ?bp=. */
@@ -586,48 +780,83 @@ export class FrameProxy {
 	}
 
 	/**
+	 * Remove `crossorigin` from script/link tags in the HTML. A CORS-mode
+	 * subresource load requires the CDN to grant CORS to OUR origin, which it
+	 * never does (it grants the site's real origin), so the load fails with a
+	 * CORS error even though it answered 200 — Google's boq loader tags its
+	 * bundles with crossorigin="anonymous" and the app then never boots.
+	 * Without the attribute the same URL loads as an ordinary classic script,
+	 * which needs no grant. Tags carrying `integrity` are left alone: SRI over an
+	 * opaque (no-cors) response always fails. Font preloads are left alone too —
+	 * fonts are always fetched in CORS mode by @font-face, so a no-cors preload
+	 * would only be wasted (harmless, but noisy in the console).
+	 */
+	private _stripCrossOrigin(html: string): string {
+		if (!/crossorigin/i.test(html)) return html;
+		return html.replace(/<(script|link)\b[^>]*>/gi, (tag) => {
+			if (!/crossorigin/i.test(tag) || /\sintegrity\s*=/i.test(tag)) return tag;
+			if (/\bas\s*=\s*["']?font/i.test(tag)) return tag;
+			return tag.replace(/\scrossorigin(\s*=\s*("[^"]*"|'[^']*'|[^\s>]*))?/i, '');
+		});
+	}
+
+	/**
 	 * Insert the shim script at the earliest possible position — right after
 	 * <head> (then <html>, then the doctype) — so it runs BEFORE any page
 	 * script: pages that call window.open during parse (OAuth auto-open pages)
 	 * would otherwise escape the interception injected before </body>. The
-	 * returned csp is the (possibly relaxed) policy to send along with the
-	 * injected body; '' means no CSP header.
+	 * returned policies are the (possibly relaxed) CSP policies to send along
+	 * with the injected body.
 	 */
-	private _injectShimTag(html: Buffer, target: ProxyTarget, csp: string): { html: Buffer; csp: string } {
-		const { csp: cspOut, nonce } = this._cspForShim(csp);
+	private _injectShimTag(
+		html: Buffer,
+		target: ProxyTarget,
+		cspIn: string | string[] | number | undefined
+	): { html: Buffer; policies: string[] } {
+		const { policies, nonce } = this._cspForShim(FrameProxy._splitCspList(cspIn));
 		const nonceAttr = nonce ? ' nonce="' + nonce + '"' : '';
 		const tag = '<script' + nonceAttr + ' src="' + this._shimSrc(target) + '"></script>';
-		const s = html.toString('utf8');
+		const s = this._stripCrossOrigin(html.toString('utf8'));
 		// <head> (not a prefix match — <header> would false-positive).
 		let m = /<head(\s[^>]*)?>/i.exec(s);
 		if (m) {
 			const at = m.index + m[0].length;
-			return { html: Buffer.from(s.slice(0, at) + tag + s.slice(at), 'utf8'), csp: cspOut };
+			return { html: Buffer.from(s.slice(0, at) + tag + s.slice(at), 'utf8'), policies };
 		}
 		m = /<html(\s[^>]*)?>/i.exec(s);
 		if (m) {
 			const at = m.index + m[0].length;
-			return { html: Buffer.from(s.slice(0, at) + tag + s.slice(at), 'utf8'), csp: cspOut };
+			return { html: Buffer.from(s.slice(0, at) + tag + s.slice(at), 'utf8'), policies };
 		}
 		// No <html> either: after the doctype if there is one — inserting before
 		// it would flip the document into quirks mode.
 		m = /^(\s*<!doctype[^>]*>)/i.exec(s);
 		if (m) {
-			return { html: Buffer.from(m[1] + tag + s.slice(m[1].length), 'utf8'), csp: cspOut };
+			return { html: Buffer.from(m[1] + tag + s.slice(m[1].length), 'utf8'), policies };
 		}
-		return { html: Buffer.from(tag + s, 'utf8'), csp: cspOut };
+		return { html: Buffer.from(tag + s, 'utf8'), policies };
 	}
 
 	private _pipeOrInjectHtml(
 		pres: http.IncomingMessage,
 		res: http.ServerResponse,
-		target: ProxyTarget
+		target: ProxyTarget,
+		method: string
 	): void {
 		const outHeaders = this._copyResponseHeaders(pres, target);
+		const status = pres.statusCode ?? 502;
 		const declaredLen = parseInt(String(pres.headers['content-length'] || ''), 10);
+		// Bodyless responses must be relayed as-is: injecting the shim into a HEAD
+		// reply or into a 204/304 would both synthesize a body that must not exist
+		// and rewrite content-length to the shim tag's size.
+		const bodyless = method === 'HEAD' || status === 204 || status === 304;
 		// Known-large or non-HTML: stream unchanged (no shim).
-		if (!this._isHtmlResponse(pres.headers) || (Number.isFinite(declaredLen) && declaredLen > HTML_INJECT_MAX_BYTES)) {
-			res.writeHead(pres.statusCode ?? 502, outHeaders);
+		if (
+			bodyless ||
+			!this._isHtmlResponse(pres.headers) ||
+			(Number.isFinite(declaredLen) && declaredLen > HTML_INJECT_MAX_BYTES)
+		) {
+			res.writeHead(status, outHeaders);
 			pres.pipe(res);
 			return;
 		}
@@ -647,7 +876,7 @@ export class FrameProxy {
 
 		const startPassthrough = (firstOverflowChunk: Buffer) => {
 			passthrough = true;
-			res.writeHead(pres.statusCode ?? 502, outHeaders);
+			res.writeHead(status, outHeaders);
 			for (const c of chunks) {
 				writeChunk(c);
 			}
@@ -687,29 +916,25 @@ export class FrameProxy {
 				if (encoding) {
 					buf = this._decompressBody(buf, encoding);
 				}
-				const injected = this._injectShimTag(
-					buf,
-					target,
-					String(outHeaders['content-security-policy'] || '')
-				);
+				const injected = this._injectShimTag(buf, target, outHeaders['content-security-policy']);
 				buf = injected.html;
 				// Send the shim-adapted CSP only on the injected path — if injection
 				// failed and we serve the raw body below, the page keeps its original
 				// policy (and its original script rules).
-				if (injected.csp) {
-					outHeaders['content-security-policy'] = injected.csp;
-				} else {
+				if (injected.policies.length === 0) {
 					delete outHeaders['content-security-policy'];
+				} else {
+					FrameProxy._setCspHeader(outHeaders, injected.policies);
 				}
 				delete outHeaders['content-encoding'];
 				delete outHeaders['content-length'];
 				outHeaders['content-length'] = buf.length;
-				res.writeHead(pres.statusCode ?? 502, outHeaders);
+				res.writeHead(status, outHeaders);
 				res.end(buf);
 			} catch {
 				delete outHeaders['content-length'];
 				outHeaders['content-length'] = raw.length;
-				res.writeHead(pres.statusCode ?? 502, outHeaders);
+				res.writeHead(status, outHeaders);
 				res.end(raw);
 			}
 		});
@@ -793,7 +1018,7 @@ export class FrameProxy {
 				rejectUnauthorized,
 			},
 			(pres) => {
-				this._pipeOrInjectHtml(pres, res, target);
+				this._pipeOrInjectHtml(pres, res, target, req.method || 'GET');
 			}
 		);
 		preq.on('error', () => {

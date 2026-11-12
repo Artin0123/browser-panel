@@ -2,7 +2,7 @@
   "name": "browser-panel",
   "displayName": "Browser Panel",
   "description": "Embedded browser for the VS Code bottom panel / secondary sidebar. Address bar, reload, DevTools (F12) and open-in-external-browser. Defaults to http://localhost:80 for local development preview.",
-  "version": "0.4.4",
+  "version": "0.4.5",
   "publisher": "artin",
   "license": "MIT",
   "icon": "resources/icon.png",
@@ -86,8 +86,8 @@
     "build": "node esbuild.js",
     "watch": "node esbuild.js --watch",
     "typecheck": "tsc --noEmit",
-    "package": "vsce package",
-    "lint": "eslint src"
+    "test": "node test/proxy-units.js",
+    "package": "vsce package"
   },
   "devDependencies": {
     "@types/node": "^26.6.5",
