@@ -34,7 +34,9 @@
 
 - Webview: the iframe `src` is set only for `http:`/`https:` values. Every caller already normalizes its input, but the address bar, the navigations a page reports and the stored startup URL all arrive from outside this file, so the single DOM write re-checks the scheme and drops anything else. Script-adjacent schemes were already unreachable — the webview CSP declares `frame-src http: https:` — and the check keeps that true if the CSP is ever loosened.
 
-- Toolchain: `npm audit` reports no vulnerabilities. `@azure/identity` resolves to 4.14.1 (which pulls `@azure/msal-node` 7.2.1) inside the range `@vscode/vsce` already declares, and an `overrides` entry moves `minimatch` to 11.0.8 over the 10.x that `vsce` pins. Both sit in the dev toolchain: the packaged extension has no runtime dependencies, and `vsce package` output is unchanged apart from its own `package.json`.
+- Toolchain: `npm audit` reports no vulnerabilities. `@azure/identity` resolves to 4.14.1 (which pulls `@azure/msal-node` 7.2.1) inside the range `@vscode/vsce` already declares, and an `overrides` entry moves `minimatch` to 11.0.8 over the 10.x that `vsce` pins — packaging still emits the same 19 files. Both sit in the dev toolchain: the packaged extension has no runtime dependencies.
+
+- Code scanning: the four CodeQL findings on the two `frame.setAttribute('src', …)` calls are dismissed as false positives, with the reasoning in each alert thread. The query cannot see through `isFrameSrc()`, and nothing short of removing the write would silence it — pointing the frame at loading user-chosen URLs is what the panel does. The gate and the CSP `frame-src` stay as the real defences, and `test/webview-units.js` holds the gate in place.
 
 ### Docs
 
