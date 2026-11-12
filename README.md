@@ -60,10 +60,12 @@ Embedded browser for the VS Code **bottom panel / secondary sidebar** — defaul
 ```
 npm install
 npm run watch     # or: npm run build
-npm test          # proxy unit checks (CSP, shim injection, URL/header mapping)
+npm test          # proxy and webview unit checks
 ```
 
 Press `F5` in VS Code to launch the Extension Development Host.
+
+To ship a version: bump `version` in `package.json`, then push a tag with the same number (`0.4.5`, no `v` prefix). The `Publish extension` workflow packages the vsix once, publishes that file to the Marketplace, and attaches it to a GitHub release whose notes come from the matching `CHANGELOG.md` section. The run aborts when the tag and `package.json` disagree.
 
 ## License
 

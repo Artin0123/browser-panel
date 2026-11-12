@@ -23,6 +23,9 @@ jobs:
 
     steps:
       - uses: actions/checkout@v4
+        with:
+          # Full history and tags: the release notes name the previous tag.
+          fetch-depth: 0
 
       - uses: actions/setup-node@v4
         with:
@@ -65,6 +68,10 @@ jobs:
           fs.writeFileSync("release-notes.md", body);
           console.log(body ? body.length + " chars of release notes" : "no changelog section for " + process.env.VERSION);
           '
+          PREV=$(git describe --tags --abbrev=0 --match '[0-9]*' "$(git rev-parse -q --verify "refs/tags/${VERSION}" >/dev/null && echo "${VERSION}^" || echo HEAD)" 2>/dev/null || true)
+          if [ -n "${PREV}" ]; then
+            printf '\n**Full Changelog**: https://github.com/%s/compare/%s...%s\n' "${GITHUB_REPOSITORY}" "${PREV}" "${VERSION}" >> release-notes.md
+          fi
 
       - name: Create or update the GitHub release
         env:
