@@ -306,7 +306,26 @@ import { svgIcon } from './icons.js';
 	 * navigation: drop the previous navigation's probe/verify bookkeeping (the
 	 * callers assign their own fresh pendingCheck right after this).
 	 */
+	/**
+	 * Only http(s) may ever reach the frame attribute. Callers already run their
+	 * value through normalizeUrl()/toProxyUrl(), but the address bar, the
+	 * page-reported navigations and the startup config are all outside input, so
+	 * the single place that writes the DOM re-checks: a javascript:/data:/file:
+	 * value would run in the webview origin or load something the proxy cannot
+	 * rewrite. Both producers emit a lowercase scheme (new URL().href and
+	 * url.protocol), so a prefix test is exact here.
+	 */
+	function isFrameSrc(u) {
+		return typeof u === 'string' && (u.startsWith('http://') || u.startsWith('https://'));
+	}
+
 	function setFrameSrc(src) {
+		if (!isFrameSrc(src)) {
+			// Dropping the assignment keeps whatever the panel shows; the rejected
+			// value is the caller's business and every caller surfaces it already.
+			console.warn('[browser-panel] refused frame src with a non-http(s) scheme:', String(src).slice(0, 12));
+			return;
+		}
 		resetLoadTracking();
 		if (frame.getAttribute('src') === src) {
 			const seq = ++frameSrcSeq;

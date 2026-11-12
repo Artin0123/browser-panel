@@ -28,7 +28,13 @@
 
 - Webview: the probe bookkeeping and the 20 s load safety net live in `beginProbe()` / `armLoadSafetyNet()` instead of four copies.
 
-- Tests: `npm test` runs `test/proxy-units.js` — 90 checks over the rules that each caused a field bug (CSP policy lists and nonce lifting, `crossorigin` stripping, shim injection points, `Sec-Fetch-Dest`, open-proxy rejection, `Next-Url`/`Referer` mapping, cache-poisoning headers, redirect rewriting). It bundles the shipped `src/proxy.ts` with the project's own esbuild.
+- Tests: `npm test` runs `test/proxy-units.js` — 90 checks over the rules that each caused a field bug (CSP policy lists and nonce lifting, `crossorigin` stripping, shim injection points, `Sec-Fetch-Dest`, open-proxy rejection, `Next-Url`/`Referer` mapping, cache-poisoning headers, redirect rewriting). It bundles the shipped `src/proxy.ts` with the project's own esbuild. `test/webview-units.js` adds 70 checks over `src/webview/app.js`, lifting the shipped functions by name: what `normalizeUrl()` accepts and rejects, what `toProxyUrl()` emits in both proxy modes, and what the frame `src` gate lets through.
+
+### Security
+
+- Webview: the iframe `src` is set only for `http:`/`https:` values. Every caller already normalizes its input, but the address bar, the navigations a page reports and the stored startup URL all arrive from outside this file, so the single DOM write re-checks the scheme and drops anything else. Script-adjacent schemes were already unreachable — the webview CSP declares `frame-src http: https:` — and the check keeps that true if the CSP is ever loosened.
+
+- Toolchain: `npm audit` reports no vulnerabilities. `@azure/identity` resolves to 4.14.1 (which pulls `@azure/msal-node` 7.2.1) inside the range `@vscode/vsce` already declares, and an `overrides` entry moves `minimatch` to 11.0.8 over the 10.x that `vsce` pins. Both sit in the dev toolchain: the packaged extension has no runtime dependencies, and `vsce package` output is unchanged apart from its own `package.json`.
 
 ### Docs
 
