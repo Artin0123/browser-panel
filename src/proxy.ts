@@ -1,6 +1,7 @@
 import * as http from 'http';
 import * as https from 'https';
 import * as zlib from 'zlib';
+import { CookieJar } from './cookie-jar';
 
 /**
  * Local HTTP proxy that lets frame-blocked sites render inside the webview iframe.
@@ -33,7 +34,8 @@ import * as zlib from 'zlib';
  *   shim reuses the policy's own nonce or appends 'self' to script-src /
  *   default-src (host sources are what authorize external scripts), since a
  *   blocked shim means blocked popups and no URL tracking.
- * - Set-Cookie is intentionally dropped (logins don't persist via the proxy).
+ * - Set-Cookie is never forwarded to the browser; when an opt-in CookieJar is
+ *   enabled, cookies are held on the extension host instead.
  */
 
 /** Max HTML body size to buffer for shim injection (bytes). */
@@ -137,10 +139,70 @@ export const SHIM_JS =
 	'else if(/^https?:/i.test(u)){e.preventDefault();e.stopPropagation();openExt(u)}' +
 	'}' +
 	'},true);' +
-	'try{if(navigator.clipboard&&navigator.clipboard.writeText){' +
-	'var w=navigator.clipboard.writeText.bind(navigator.clipboard);' +
-	'navigator.clipboard.writeText=function(text){' +
-	'return w(text).catch(function(){send("copy",{text:String(text)});return Promise.resolve()})' +
+	// Clipboard bridge: in a VS Code webview iframe, Permissions-Policy often blocks
+	// clipboard-write (making writeText/write reject, permissions.query report
+	// "denied", or document.execCommand("copy") return false). Fall back to
+	// extension-host vscode.env.clipboard.writeText via postMessage.
+	'var clipCopy=function(t){send("copy",{text:String(t)})};' +
+	'try{' +
+	'var clip=navigator.clipboard;' +
+	'if(clip){' +
+	'if(clip.writeText){' +
+	'var wt=clip.writeText.bind(clip);' +
+	'clip.writeText=function(text){' +
+	'try{return Promise.resolve(wt(text)).catch(function(){clipCopy(text)})}' +
+	'catch(e){clipCopy(text);return Promise.resolve()}' +
+	'}' +
+	'}else{clip.writeText=function(text){clipCopy(text);return Promise.resolve()}}' +
+	'if(clip.write){' +
+	'var wr=clip.write.bind(clip);' +
+	'clip.write=function(items){' +
+	'var fallback=function(err){' +
+	'try{var arr=Array.isArray(items)?items:Array.from(items||[]);' +
+	'for(var i=0;i<arr.length;i++){var it=arr[i];' +
+	'if(it&&it.types&&it.types.indexOf("text/plain")!==-1&&it.getType){' +
+	'return Promise.resolve(it.getType("text/plain")).then(function(b){return b.text()}).then(function(t){clipCopy(t)})' +
+	'}}' +
+	'}catch(e){}return Promise.reject(err)' +
+	'};' +
+	'try{return Promise.resolve(wr(items)).catch(fallback)}catch(e){return fallback(e)}' +
+	'}' +
+	'}' +
+	'}else{' +
+	'Object.defineProperty(navigator,"clipboard",{configurable:true,value:{' +
+	'writeText:function(text){clipCopy(text);return Promise.resolve()},' +
+	'write:function(items){' +
+	'try{var arr=Array.isArray(items)?items:Array.from(items||[]);' +
+	'for(var i=0;i<arr.length;i++){var it=arr[i];' +
+	'if(it&&it.types&&it.types.indexOf("text/plain")!==-1&&it.getType){' +
+	'return Promise.resolve(it.getType("text/plain")).then(function(b){return b.text()}).then(function(t){clipCopy(t)})' +
+	'}}' +
+	'}catch(e){}return Promise.reject(new DOMException("Clipboard write failed","NotAllowedError"))' +
+	'}}})' +
+	'}' +
+	'}catch(e){}' +
+	'try{if(navigator.permissions&&navigator.permissions.query){' +
+	'var pq=navigator.permissions.query.bind(navigator.permissions);' +
+	'navigator.permissions.query=function(desc){' +
+	'var isClipWrite=desc&&desc.name==="clipboard-write";' +
+	'var grant=function(){return{state:"granted",name:"clipboard-write",onchange:null,addEventListener:function(){},removeEventListener:function(){},dispatchEvent:function(){return true}}};' +
+	'if(!isClipWrite)return pq(desc);' +
+	'try{return Promise.resolve(pq(desc)).then(function(st){return st&&st.state==="denied"?grant():st},function(){return grant()})}catch(e){return Promise.resolve(grant())}' +
+	'}' +
+	'}}catch(e){}' +
+	'try{var ec=Document.prototype.execCommand;' +
+	'if(ec){Document.prototype.execCommand=function(cmd){' +
+	'var ok=false;try{ok=ec.apply(this,arguments)}catch(e){ok=false}' +
+	'if(!ok&&String(cmd).toLowerCase()==="copy"){' +
+	'var txt="";try{' +
+	'var ae=document.activeElement;' +
+	'if(ae&&(ae.tagName==="TEXTAREA"||ae.tagName==="INPUT")&&typeof ae.selectionStart==="number"&&typeof ae.selectionEnd==="number"){' +
+	'txt=ae.value.slice(ae.selectionStart,ae.selectionEnd)' +
+	'}' +
+	'if(!txt&&window.getSelection)txt=String(window.getSelection()||"")' +
+	'}catch(e){}' +
+	'if(txt){clipCopy(txt);return true}' +
+	'}return ok' +
 	'}}' +
 	'}catch(e){}' +
 	// Drop cross-origin mode from scripts/links the page creates: the CDN grants
@@ -206,10 +268,15 @@ export class FrameProxy {
 	private readonly _upgradeSockets = new Set<import('stream').Duplex>();
 
 	/**
-	 * Whether to accept self-signed certificates (browser.acceptSelfSignedCerts).
-	 * Read per request so setting changes apply without restarting the proxy.
+	 * Whether to accept self-signed certificates (browser.acceptSelfSignedCerts)
+	 * and optional extension-host CookieJar (browser.proxyCookieJar).
+	 * Both settings are read per request so changes apply without restarting.
 	 */
-	constructor(private readonly _acceptSelfSigned: () => boolean) { }
+	constructor(
+		private readonly _acceptSelfSigned: () => boolean,
+		private readonly _cookieJar?: CookieJar,
+		private readonly _cookieJarEnabled: () => boolean = () => Boolean(_cookieJar)
+	) { }
 
 	get baseUrl(): string {
 		return `http://127.0.0.1:${this._port}/p/${this._token}/`;
@@ -437,6 +504,12 @@ export class FrameProxy {
 		if (typeof nextUrl === 'string') {
 			headers['next-url'] = this._toTargetPath(nextUrl, target);
 		}
+		if (this._cookieJar && this._cookieJarEnabled()) {
+			const cookieHeader = this._cookieJar.send(target.url, target.url.protocol === 'https:');
+			if (cookieHeader) {
+				headers.cookie = cookieHeader;
+			}
+		}
 		return headers;
 	}
 
@@ -517,10 +590,11 @@ export class FrameProxy {
 		preq.on('upgrade', (res: http.IncomingMessage, upSocket: import('stream').Duplex, upHead: Buffer) => {
 			this._upgradeSockets.add(upSocket);
 			upSocket.on('close', () => this._upgradeSockets.delete(upSocket));
+			this._receiveCookies(res, target);
 			socket.write('HTTP/1.1 101 Switching Protocols\r\n');
 			for (const [k, v] of Object.entries(res.headers)) {
 				if (k.toLowerCase() === 'set-cookie') {
-					continue; // Set-Cookie is intentionally dropped (see file header)
+					continue; // never forward Set-Cookie to the browser
 				}
 				socket.write(k + ': ' + (Array.isArray(v) ? v.join(', ') : String(v)) + '\r\n');
 			}
@@ -540,12 +614,39 @@ export class FrameProxy {
 		preq.end();
 	}
 
+	private _rawSetCookies(res: http.IncomingMessage): string[] {
+		const values: string[] = [];
+		const raw = res.rawHeaders || [];
+		for (let i = 0; i + 1 < raw.length; i += 2) {
+			if (raw[i].toLowerCase() === 'set-cookie') {
+				values.push(raw[i + 1]);
+			}
+		}
+		if (values.length === 0) {
+			const v = res.headers['set-cookie'];
+			if (typeof v === 'string') values.push(v);
+			else if (Array.isArray(v)) values.push(...v);
+		}
+		return values;
+	}
+
+	private _receiveCookies(res: http.IncomingMessage, target: ProxyTarget): void {
+		if (!this._cookieJar || !this._cookieJarEnabled()) {
+			return;
+		}
+		const isHttps = target.url.protocol === 'https:';
+		for (const sc of this._rawSetCookies(res)) {
+			this._cookieJar.receive(target.url, sc, isHttps);
+		}
+	}
+
 	private _copyResponseHeaders(pres: http.IncomingMessage, target: ProxyTarget): http.OutgoingHttpHeaders {
+		this._receiveCookies(pres, target);
 		const outHeaders: http.OutgoingHttpHeaders = {};
 		for (const [k, v] of Object.entries(pres.headers)) {
 			const lk = k.toLowerCase();
 			if (lk === 'x-frame-options' || lk === 'set-cookie') {
-				continue; // strip frame-blocking; drop cookies (logins don't persist via proxy)
+				continue; // strip frame-blocking; never forward Set-Cookie to the browser
 			}
 			// Hop-by-hop headers must not be forwarded (and transfer-encoding in
 			// particular conflicts with the recomputed content-length on the inject

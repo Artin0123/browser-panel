@@ -106,9 +106,11 @@ CDN 只對站台的真實 origin 發 `Access-Control-Allow-Origin`。頁面若�
 | `https://antigravity.google.com/u/2/` | `redirect_uri_mismatch` |
 | `http://127.0.0.1:<port>/`、`…/p/<token>/https/antigravity.google.com/u/2/` | `invalid_request`，訊息要求「upgrade to a supported browser」 |
 
-補上 cookie 轉發只對靠伺服器端 session 的普通站台有用（Django、Rails、PHP 那種），對第 3 層的硬否決照樣無效，而共用 origin 會帶進一批新邊界：domain 衝突、`HttpOnly` 失去意義、兩個站台互相看到對方的 cookie。所以代理不做 cookie jar。
+補上瀏覽器端 cookie 轉發只對靠伺服器端 session 的普通站台有用（Django、Rails、PHP 那種），對第 3 層的硬否決照樣無效，而共用 origin 會帶進一批新邊界：domain 衝突、`HttpOnly` 失去意義、兩個站台互相看到對方的 cookie。因此**瀏覽器端轉發維持不做**。
 
-登入能成立的情況只有一種：關掉代理，且站台本身允許被內嵌。cookie 存在 webview 的 Electron session 裡，跨 hide／show、Close／Reopen、編輯器重啟都在，只有「Developer: Clear Webview Storage」或站台自己的過期會清掉。需要身分的流程一律用選單的 **Open in external browser**。
+**代理端 cookie jar（opt-in，`browser.proxyCookieJar`，預設關閉）**：若需要維持伺服器端 session cookie（如自架工具 `dsh web`、Django/Rails/PHP 等開發伺服器），可開啟 `browser.proxyCookieJar`。`Set-Cookie` 仍不轉發給瀏覽器，而是由擴充宿主在 `CookieJar` 中按目標 origin 自持並存入作業系統加密的 `SecretStorage`（跨 VS Code 重啟存活），出站請求再由代理組裝 `Cookie` 標頭；可用指令 **Clear Proxied Logins**（`browser.clearProxiedLogins`）清除。威脅模型限制：因所有經代理站台共用同一代理 origin，已載入的頁面理論上可透過顯式 `/p/<token>/…` 路徑讀取其他目標的已認證內容，故**不建議在代理瀏覽不可信網站時開啟**。
+
+未開啟 `browser.proxyCookieJar` 時，登入能成立的情況只有一種：關掉代理，且站台本身允許被內嵌。cookie 存在 webview 的 Electron session 裡，跨 hide／show、Close／Reopen、編輯器重啟都在，只有「Developer: Clear Webview Storage」或站台自己的過期會清掉。需要外部身分的流程一律用選單的 **Open in external browser**。
 
 ## 外部開啟的 URL 要原樣送出
 

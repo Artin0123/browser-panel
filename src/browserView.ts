@@ -180,7 +180,7 @@ export class BrowserViewProvider implements vscode.WebviewViewProvider {
 
 	// ------------------------------------------------------------------ history
 	private _getHistory(): HistoryEntry[] {
-		const raw = this._context.workspaceState.get<unknown>(HISTORY_KEY, []);
+		const raw = this._context.globalState.get<unknown>(HISTORY_KEY, []);
 		// Defensive parse: corrupt storage or an older format must not break the
 		// history feature (TypeError in _addHistory / the picker) — filter bad entries.
 		if (!Array.isArray(raw)) {
@@ -210,14 +210,14 @@ export class BrowserViewProvider implements vscode.WebviewViewProvider {
 			next.unshift({ url, timestamp: Date.now() });
 		}
 		await Promise.all([
-			this._context.workspaceState.update(LAST_URL_KEY, url),
-			this._context.workspaceState.update(HISTORY_KEY, next),
+			this._context.globalState.update(LAST_URL_KEY, url),
+			this._context.globalState.update(HISTORY_KEY, next),
 		]);
 	}
 
 	private async _clearStorage(): Promise<void> {
-		await this._context.workspaceState.update(HISTORY_KEY, []);
-		await this._context.workspaceState.update(LAST_URL_KEY, undefined);
+		await this._context.globalState.update(HISTORY_KEY, []);
+		await this._context.globalState.update(LAST_URL_KEY, undefined);
 		this._view?.webview.postMessage({ type: 'storageCleared' });
 	}
 
@@ -320,7 +320,7 @@ export class BrowserViewProvider implements vscode.WebviewViewProvider {
 			const filtered = this._getHistory().filter(
 				(h) => !(h.url === target.removeUrl && h.timestamp === target.removeTimestamp)
 			);
-			await this._context.workspaceState.update(HISTORY_KEY, filtered);
+			await this._context.globalState.update(HISTORY_KEY, filtered);
 			picker.items = buildItems(filtered);
 		});
 
@@ -335,8 +335,8 @@ export class BrowserViewProvider implements vscode.WebviewViewProvider {
 					config: getConfig(),
 					proxy: this._proxyInfo(),
 					language: vscode.env.language,
-					lastUrl: this._context.workspaceState.get<string>(LAST_URL_KEY, ''),
-					closed: this._context.workspaceState.get<boolean>(CLOSED_KEY, false),
+					lastUrl: this._context.globalState.get<string>(LAST_URL_KEY, ''),
+					closed: this._context.globalState.get<boolean>(CLOSED_KEY, false),
 				});
 				break;
 			case 'navigate':
@@ -368,7 +368,7 @@ export class BrowserViewProvider implements vscode.WebviewViewProvider {
 				break;
 			case 'setClosed':
 				// Persist the explicit closed state so a re-resolve / restart stays closed.
-				await this._context.workspaceState.update(CLOSED_KEY, msg.closed === true);
+				await this._context.globalState.update(CLOSED_KEY, msg.closed === true);
 				break;
 			case 'clearStorage':
 				await this._clearStorage();

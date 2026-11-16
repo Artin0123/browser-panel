@@ -10,9 +10,9 @@
 
 | # | 議題 | 定案 |
 |---|------|------|
-| 1 | 關閉狀態 | **保留 `browser.closed` 持久化**。關閉後重啟仍顯示 empty／需按 Reopen。點 Reopen／導航開啟時自動載入 `lastUrl`。連不上時停轉圈 + 自動重連（見 #4–5），不改成「關閉不持久化」。 |
+| 1 | 關閉狀態 | **保留 `browser.closed` 持久化**（存 `globalState`，跨工作區共用；見 #3）。關閉後重啟仍顯示 empty／需按 Reopen。點 Reopen／導航開啟時自動載入 `lastUrl`。連不上時停轉圈 + 自動重連（見 #4–5），不改成「關閉不持久化」。 |
 | 2 | 站內導航寫回 `lastUrl` | **C：不寫回**。僅工具列／選單／前進後退等會 `postMessage({ type: 'navigate' })` 的路徑更新 Host `lastUrl`。iframe 內點連結只更新位址列與本地 back stack。 |
-| 3 | `lastUrl` 儲存 | **A：僅 `workspaceState`**（不寫 `globalState`）。 |
+| 3 | 狀態儲存範圍 | **三鍵（`lastUrl` / `history` / `closed`）皆存 `globalState`**，跨工作區共用、不遷移舊資料（2026-11-16 修訂，見 [GLOBAL-STORAGE-DESIGN.md](GLOBAL-STORAGE-DESIGN.md)）。 |
 | 4 | 自動重連範圍 | **A：僅連線失敗**（`ok: false`）。`frameBlocked`（禁內嵌）不自動重試。 |
 | 5 | 重連節奏 | **A：固定 10 秒**倒數；僅「取消自動重試」（與錯誤頁其他按鈕同款 `empty-btn`）；換網址／關閉／隱藏錯誤頁即停。工具列重新整理仍可手動重試。 |
 | 6 | 剪貼簿 | **B**：iframe 加 `allow`（盡力）；**可靠路徑需 `proxyEnabled`**：shim 攔截 `writeText` 的 `NotAllowedError`，經 webview → `copyText` → `vscode.env.clipboard.writeText`。直連跨來源無法注入 shim，Permissions Policy 錯誤仍會出現。 |
@@ -95,7 +95,7 @@ The Clipboard API has been blocked because of a permissions policy...
 1. **保留** `setClosed`／`browser.closed`；關閉狀態不自動載入頁面。
 2. 關閉或 `config` 且 closed：位址列仍填 `lastUrl || defaultUrl`（可看見上次連結）；Reopen／Home／Go 才 `navigate`。
 3. `closeBrowser`／工具列導航時更新本地 `lastUrl`；**不**在 iframe `load` 回寫 Host（定案 2C）。
-4. 儲存維持 `workspaceState` only（定案 3A）。
+4. 三鍵皆存 `globalState`（見定案 3）。
 5. 轉圈與自動重連交問題二處理。
 
 ---
@@ -117,7 +117,7 @@ The Clipboard API has been blocked because of a permissions policy...
 | Service Worker | **未修** | webview 不支援（README 已述） |
 | 跨來源最終 URL／位址列 | **未修** | 父層讀不到 redirect 後 URL |
 | `alert` / `confirm` / `prompt` | **未修** | 可能被擋或體驗差 |
-| Proxy 丟棄 Set-Cookie | **刻意不修** | 見 PROXY.md |
+| Proxy 丟棄 Set-Cookie | **瀏覽器端維持丟棄** | 預設不保留 cookie；可選開啟 `browser.proxyCookieJar` 由擴充宿主代持（見 [PROXY.md](PROXY.md) / [COOKIE-JAR-DESIGN.md](COOKIE-JAR-DESIGN.md)） |
 
 ---
 
@@ -309,7 +309,7 @@ VS Code webview 內容住在外層 sandboxed iframe（無 `allow-popups`）；HT
 | 2 | 修完 403 後一直轉圈 | 兩個獨立原因疊加。①`Content-Security-Policy` 的標頭值是**逗號分隔的政策清單**，舊碼只按 `';'` 切，nonce 抬不到 shim 標籤上；②頁面的 `<script crossorigin="anonymous">` 把 CDN bundle 逼進 CORS 模式，同一個檔案回 200 仍被判失敗（`net::ERR_FAILED 200 (OK)`），主 bundle 從未執行。修法：從 `rawHeaders` 取標頭並逐條政策處理（`_splitCspList()` / `_cspPolicies()` / `_cspForShim()` / `_setCspHeader()`）；靜態剝 `crossorigin`（保留 `integrity` 與 `as=font`）＋ shim 覆寫 `crossOrigin` setter 與 `setAttribute('crossorigin')`。 |
 | 3 | 點 Sign in 沒反應 | 頁面上有**兩個**登入元素且失效原因不同。①Google One Bar 的 `<a aria-label="Sign in" target="_top">`：宿主給 webview 的 sandbox 旗標是 `allow-scripts`／`allow-same-origin`／`allow-forms`／`allow-pointer-lock`／`allow-downloads`，**沒有 `allow-top-navigation`、沒有 `allow-popups`**，換頂層文件的導航被瀏覽器**靜默丟棄**；shim 改為「同站的 `_top`／`_parent` 留在面板內導航、跨站交給系統瀏覽器」，特殊 scheme（`javascript:`／`mailto:`／`tel:`／`data:`／`blob:`／`about:`）放行。②中間藍色 `<button class="btn-primary-google">`：站台 `signIn()` 在 `window.location.protocol !== "http:" || !isLocalhost(hostname)` 條件下函式體為空，屬站台自己的 localhost dev 分支。`window.location` 無法偽造（`defineProperty` 拋 `TypeError`，`href` 存取子不可配置），只有 `Location.prototype.assign`／`replace` 包得住，所以 shim 攔不到 `location.href = …`。**列為不可修**，出口是選單的 **Open in external browser**。 |
 | 4 | 面板 Sign in 開到外部瀏覽器變 404 | 宿主 `_doOpenExternal()` 對 `Uri` 物件再跑一次 `encodeURI(uri.toString(true))`，既有的 `%` 轉義被多轉一層：`%3F` → `%253F`，`continue` 參數解出來變成 `https://antigravity.google.com/%3Fpli=1`。字串形態則原樣轉發。修 `_openExternal` 為「先送字串、宿主拒收才退回 `Uri.parse`」。**不採用**「把 `%3F` 還原成 `?`」的補償寫法：那會改動 URL 本體，遇到位元組完全一致的簽名式網址就壞。 |
-| 5 | 在外部瀏覽器登入後，憑證帶不回面板 | 三層各自獨立，只修一層不夠。**L1** 系統瀏覽器 profile 與 webview 的 Electron session 是兩個行程、兩個儲存分區，彼此沒有 API；代理模式下頁面又只有 `http://127.0.0.1:<port>` 一個 origin。**L2** 代理在設計上丟 `Cookie` 與 `Set-Cookie`（HTTP 與 WebSocket 握手兩條路徑都不轉發）：代理 origin 由所有經代理網站共用，轉發會讓不同站台的 session 互染。**L3** 站台自己的 OAuth client 只註冊 `https://antigravity.google.com/`，實測 `redirect_uri` 四格：註冊值回 `interaction_required`、`/u/2/` 回 `redirect_uri_mismatch`、`http://127.0.0.1:<port>/…` 回 `invalid_request`（要求「upgrade to a supported browser」）。**決策：不做 cookie jar**——補 L2 只對伺服器端 session 的普通站台有用，對 L3 的硬否決無效，卻會帶進 domain 衝突、`HttpOnly` 失效、兩站互看 cookie 等新邊界。 |
+| 5 | 在外部瀏覽器登入後，憑證帶不回面板 | 三層各自獨立，只修一層不夠。**L1** 系統瀏覽器 profile 與 webview 的 Electron session 是兩個行程、兩個儲存分區，彼此沒有 API；代理模式下頁面又只有 `http://127.0.0.1:<port>` 一個 origin。**L2** 代理在設計上丟 `Cookie` 與 `Set-Cookie`（HTTP 與 WebSocket 握手兩條路徑都不轉發）：代理 origin 由所有經代理網站共用，轉發會讓不同站台的 session 互染。**L3** 站台自己的 OAuth client 只註冊 `https://antigravity.google.com/`，實測 `redirect_uri` 四格：註冊值回 `interaction_required`、`/u/2/` 回 `redirect_uri_mismatch`、`http://127.0.0.1:<port>/…` 回 `invalid_request`（要求「upgrade to a supported browser」）。**決策：不做瀏覽器端 cookie 轉發**——補 L2 只對伺服器端 session 的普通站台有用，對 L3 的硬否決無效，卻會帶進 domain 衝突、`HttpOnly` 失效、兩站互看 cookie 等新邊界。（2026-11-17 補充：針對純伺服器端 session 的自架/開發服務，另提供 opt-in 的擴充宿主端 cookie jar `browser.proxyCookieJar` 預設關閉，cookie 不進瀏覽器；見 [COOKIE-JAR-DESIGN.md](COOKIE-JAR-DESIGN.md)。） |
 | 6 | 手動貼 token 後回 401 | 不是面板限制。貼上的 `ya29…` 是**已過期**的憑證（`expiry_date: 2026-10-27T19:23:24Z`），401 訊息與 `loadCodeAssist` 的原話逐字一致。換新鮮 token 後仍有第二層：`userinfo` 200、`loadCodeAssist` 200 但回 `UNSUPPORTED_CLIENT`、`fetchAvailableModels` 403 `PERMISSION_DENIED`——**帳號層級限制，非本擴充可修**。另外 refresh 不可行（憑證檔缺 `client_secret`，`agy.exe` 內嵌的 secret 全部 `invalid_client`），改交付取 token 的腳本。 |
 
 ### 覆核附註

@@ -1,18 +1,59 @@
 import * as vscode from 'vscode';
 import { BrowserViewProvider } from './browserView';
 import { getConfig } from './config';
+import { CookieJar } from './cookie-jar';
 import { FrameProxy } from './proxy';
 
 export function activate(context: vscode.ExtensionContext): void {
+	// Extension-host cookie jar (opt-in via browser.proxyCookieJar, default off).
+	// Persisted in SecretStorage (OS-encrypted) so logins survive VS Code restarts.
+	const PROXY_COOKIE_JAR_KEY = 'browser.proxyCookieJar';
+	let saveCookiesTimer: NodeJS.Timeout | undefined;
+	let jarDirty = false;
+	const flushCookies = (): void => {
+		if (!saveCookiesTimer) {
+			return;
+		}
+		clearTimeout(saveCookiesTimer);
+		saveCookiesTimer = undefined;
+		const data = cookieJar.serialize();
+		if (data === '{}') {
+			void context.secrets.delete(PROXY_COOKIE_JAR_KEY);
+		} else {
+			void context.secrets.store(PROXY_COOKIE_JAR_KEY, data);
+		}
+	};
+	const cookieJar = new CookieJar(() => {
+		jarDirty = true;
+		clearTimeout(saveCookiesTimer);
+		saveCookiesTimer = setTimeout(flushCookies, 500);
+	});
+	void Promise.resolve(context.secrets.get(PROXY_COOKIE_JAR_KEY))
+		.then((raw) => {
+			if (raw && !jarDirty) {
+				cookieJar.load(raw);
+			}
+		})
+		.catch(() => {});
+
 	// Local proxy that strips frame-blocking headers (lazy: only runs while enabled).
-	// Cert acceptance is read per request so the setting applies without a restart.
+	// Cert acceptance and cookie jar opt-in are read per request so settings apply without a restart.
 	// The bound port is remembered in globalState and re-used on the next start so
 	// the proxy origin (and the embedded pages' localStorage — e.g. opencode's
 	// pairing token) stays stable across editor restarts; a taken port falls back
 	// to a random one (second VS Code window, port grabbed meanwhile).
-	const proxy = new FrameProxy(() => getConfig().acceptSelfSignedCerts);
+	const proxy = new FrameProxy(
+		() => getConfig().acceptSelfSignedCerts,
+		cookieJar,
+		() => getConfig().proxyCookieJar
+	);
 	const PROXY_PORT_KEY = 'browser.proxyPort';
-	context.subscriptions.push({ dispose: () => void proxy.dispose() });
+	context.subscriptions.push({
+		dispose: () => {
+			flushCookies();
+			void proxy.dispose();
+		},
+	});
 
 	// Register the browser webview view (bottom panel container, draggable to secondary sidebar).
 	const provider = new BrowserViewProvider(context, proxy);
@@ -26,6 +67,14 @@ export function activate(context: vscode.ExtensionContext): void {
 	context.subscriptions.push(
 		vscode.commands.registerCommand('browser.open', () => {
 			void vscode.commands.executeCommand('workbench.view.extension.browser-container');
+		}),
+		vscode.commands.registerCommand('browser.clearProxiedLogins', async () => {
+			clearTimeout(saveCookiesTimer);
+			saveCookiesTimer = undefined;
+			jarDirty = true;
+			cookieJar.clear();
+			await context.secrets.delete(PROXY_COOKIE_JAR_KEY);
+			void vscode.window.showInformationMessage('Browser Panel: Proxied logins cleared.');
 		})
 	);
 

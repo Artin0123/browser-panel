@@ -1,5 +1,15 @@
 # Changelog
 
+## [Unreleased]
+
+### Added
+
+- Proxy: opt-in extension-host cookie jar (`browser.proxyCookieJar`, default `false`) that holds upstream `Set-Cookie` sessions per target origin in OS-encrypted `SecretStorage` without exposing cookies to the browser, plus the **Browser: Clear Proxied Logins** (`browser.clearProxiedLogins`) command. Intended for trusted/self-hosted dev servers (not recommended when browsing untrusted sites through the proxy).
+
+### Changed
+
+- Extension host: **last URL, history and closed state are now shared across workspaces** (`globalState` instead of `workspaceState`); Clear storage clears that single shared state. Existing per-workspace entries are not migrated (history and last URL start fresh on upgrade), and a workspace-scoped `browser.defaultUrl` now mainly acts as the **Home** button target once a global last URL is recorded.
+
 ## [0.4.5] - 2026-11-13
 
 > One site — `https://antigravity.google.com/u/2/` with `browser.proxyEnabled` — exposed every defect below inside a single unreleased cycle: the page answered **403**, then spun forever, then its sign-in did nothing, then the browser it opened landed on a **404**. The proxy is generic, so each fix applies to any site with the same gate.

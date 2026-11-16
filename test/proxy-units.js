@@ -16,10 +16,12 @@
  */
 const path = require('path');
 const fs = require('fs');
+const vm = require('vm');
 const esbuild = require('esbuild');
 
 const CACHE_DIR = path.join(__dirname, '.cache');
 const BUNDLE = path.join(CACHE_DIR, 'proxy.bundle.cjs');
+const JAR_BUNDLE = path.join(CACHE_DIR, 'cookie-jar.bundle.cjs');
 
 fs.mkdirSync(CACHE_DIR, { recursive: true });
 esbuild.buildSync({
@@ -31,8 +33,26 @@ esbuild.buildSync({
 	outfile: BUNDLE,
 	logLevel: 'silent',
 });
+esbuild.buildSync({
+	entryPoints: [path.join(__dirname, '..', 'src', 'cookie-jar.ts')],
+	bundle: true,
+	platform: 'node',
+	format: 'cjs',
+	target: 'node18',
+	outfile: JAR_BUNDLE,
+	logLevel: 'silent',
+});
 
 const { FrameProxy, SHIM_JS } = require(BUNDLE);
+const {
+	CookieJar,
+	domainMatch,
+	defaultPath,
+	pathMatch,
+	MAX_COOKIES_PER_ORIGIN,
+	MAX_COOKIES_TOTAL,
+	MAX_JAR_SERIALIZED_BYTES,
+} = require(JAR_BUNDLE);
 
 let passed = 0;
 const failures = [];
@@ -92,6 +112,64 @@ for (const hook of ['openExt', 'hrefOf', 'realUrl', 'inPanel', 'crossOrigin', 'p
 	ok('SHIM_JS defines ' + hook, SHIM_JS.includes(hook));
 }
 ok('SHIM_JS reads its own ?bp= mapping', SHIM_JS.includes('document.currentScript'));
+
+// Execute SHIM_JS in a minimal mocked browser context to verify clipboard fallbacks.
+{
+	const posted = [];
+	function Document() {}
+	Document.prototype.execCommand = () => false;
+	const doc = new Document();
+	doc.currentScript = { src: 'http://127.0.0.1:4599/p/' + TOKEN + '/__bp_shim.js?bp=' + encodeURIComponent(JSON.stringify({ origin: 'https://site.test', prefix: '/p/' + TOKEN + '/' })) };
+	doc.addEventListener = () => {};
+	doc.activeElement = { tagName: 'TEXTAREA', value: 'copied-via-exec', selectionStart: 0, selectionEnd: 15 };
+
+	const ctx = {
+		URL,
+		Document,
+		document: doc,
+		location: { href: 'http://127.0.0.1:4599/', origin: 'http://127.0.0.1:4599', pathname: '/', search: '', hash: '' },
+		history: { pushState() {}, replaceState() {} },
+		parent: { postMessage(m) { posted.push(m); } },
+		navigator: {
+			clipboard: {
+				writeText: () => Promise.reject(new Error('NotAllowedError')),
+				write: () => Promise.reject(new Error('NotAllowedError')),
+			},
+			permissions: {
+				query: (d) => Promise.resolve({ state: d.name === 'clipboard-write' ? 'denied' : 'prompt' }),
+			},
+		},
+		addEventListener: () => {},
+		setTimeout,
+		getSelection: () => '',
+	};
+	ctx.window = ctx;
+	vm.runInNewContext(SHIM_JS, ctx);
+
+	// 1. execCommand('copy') fallback
+	const execOk = doc.execCommand('copy');
+	eq('SHIM_JS execCommand("copy") returns true on fallback', execOk, true);
+	ok('SHIM_JS execCommand("copy") relays selected textarea text',
+		posted.some((m) => m.type === 'copy' && m.text === 'copied-via-exec'), posted);
+
+	// 2. writeText, write(ClipboardItem), permissions.query
+	globalThis.__shimChecks = Promise.all([
+		ctx.navigator.clipboard.writeText('hello-wt'),
+		ctx.navigator.clipboard.write([{
+			types: ['text/plain'],
+			getType: () => Promise.resolve({ text: () => Promise.resolve('hello-wr') }),
+		}]),
+		ctx.navigator.permissions.query({ name: 'clipboard-write' }),
+		ctx.navigator.permissions.query({ name: 'geolocation' }),
+	]).then(([, , cw, geo]) => {
+		ok('SHIM_JS writeText fallback relays copy',
+			posted.some((m) => m.type === 'copy' && m.text === 'hello-wt'));
+		ok('SHIM_JS write(ClipboardItem) fallback relays text/plain',
+			posted.some((m) => m.type === 'copy' && m.text === 'hello-wr'));
+		eq('SHIM_JS permissions.query("clipboard-write") grants when denied', cw.state, 'granted');
+		eq('SHIM_JS permissions.query leaves other permissions untouched', geo.state, 'prompt');
+	});
+}
 
 // ---------------------------------------------------------------------------
 // Shim URL + target parsing.
@@ -360,19 +438,135 @@ eq('_isHtmlResponse matches text/html with parameters',
 eq('_isHtmlResponse rejects JSON', p._isHtmlResponse({ 'content-type': 'application/json' }), false);
 
 // ---------------------------------------------------------------------------
+// CookieJar: RFC 6265 subset, eviction, serialization, and proxy wiring.
+// ---------------------------------------------------------------------------
+eq('defaultPath /a/b/c -> /a/b', defaultPath('/a/b/c'), '/a/b');
+eq('defaultPath /a -> /', defaultPath('/a'), '/');
+eq('defaultPath / -> /', defaultPath('/'), '/');
+eq('domainMatch exact', domainMatch('app.site.test', 'app.site.test'), true);
+eq('domainMatch subdomain', domainMatch('app.site.test', 'site.test'), true);
+eq('domainMatch rejects partial label', domainMatch('badsite.test', 'site.test'), false);
+eq('domainMatch rejects IP suffix', domainMatch('10.127.0.0.1', '127.0.0.1'), false);
+eq('pathMatch /foo vs /foobar is false', pathMatch('/foobar', '/foo'), false);
+eq('pathMatch /foo vs /foo/bar is true', pathMatch('/foo/bar', '/foo'), true);
+eq('pathMatch /foo vs /foo is true', pathMatch('/foo', '/foo'), true);
+
+{
+	const jar = new CookieJar();
+	const u = new URL('https://app.site.test/sub/page');
+	const t0 = 1_000_000;
+
+	// Basic receive + default-path + hostOnly
+	jar.receive(u, 'sid=abc; HttpOnly; SameSite=Strict', true, t0);
+	eq('jar sends hostOnly cookie on matching path', jar.send(new URL('https://app.site.test/sub/other'), true, t0 + 1), 'sid=abc');
+	eq('jar omits cookie on parent path', jar.send(new URL('https://app.site.test/'), true, t0 + 1), '');
+	eq('jar isolates by targetOrigin', jar.send(new URL('http://app.site.test/sub/other'), false, t0 + 1), '');
+
+	// Domain attribute: reject mismatch, accept parent domain
+	jar.receive(u, 'bad=1; Domain=evil.test', true, t0 + 2);
+	jar.receive(u, 'shared=xyz; Domain=.site.test; Path=/', true, t0 + 3);
+	eq('jar rejects mismatched Domain and sorts longer path first',
+		jar.send(new URL('https://app.site.test/sub/x'), true, t0 + 4),
+		'sid=abc; shared=xyz');
+
+	// Replace same key preserves createdAt
+	jar.receive(u, 'sid=def', true, t0 + 10);
+	eq('jar replaces same (name, domain, path) value',
+		jar.send(new URL('https://app.site.test/sub/x'), true, t0 + 11),
+		'sid=def; shared=xyz');
+
+	// Max-Age overrides Expires; Max-Age=0 deletes
+	jar.receive(u, 'sid=gone; Max-Age=0; Expires=Wed, 21 Oct 2099 07:28:00 GMT', true, t0 + 20);
+	eq('Max-Age=0 deletes cookie even with future Expires',
+		jar.send(new URL('https://app.site.test/sub/x'), true, t0 + 21),
+		'shared=xyz');
+
+	// Secure flag only sent over https
+	const httpUrl = new URL('http://local.test:3080/');
+	jar.receive(httpUrl, 'sec=1; Secure; Path=/', false, t0 + 30);
+	eq('Secure cookie withheld on http', jar.send(httpUrl, false, t0 + 31), '');
+	eq('Secure cookie sent when isHttps=true', jar.send(httpUrl, true, t0 + 31), 'sec=1');
+
+	// Malformed / empty values do not throw
+	jar.receive(u, '', true, t0 + 40);
+	jar.receive(u, '   =nope', true, t0 + 40);
+	jar.receive(u, 'noequals', true, t0 + 40);
+	jar.load('not json{{{');
+	jar.load('[]');
+	ok('jar survives malformed inputs', jar.size() >= 2);
+}
+
+// Per-origin & global eviction + 64KB serialization cap + roundtrip
+{
+	const jar = new CookieJar();
+	const u = new URL('https://limit.test/');
+	const t0 = 2_000_000;
+	for (let i = 0; i < MAX_COOKIES_PER_ORIGIN + 10; i++) {
+		jar.receive(u, `c${i}=v${i}; Path=/`, true, t0 + i);
+	}
+	eq('jar caps per-origin cookies', jar.size(), MAX_COOKIES_PER_ORIGIN);
+	const sent = jar.send(u, true, t0 + 1000);
+	ok('oldest lastUsed evicted first (c0 gone, newest kept)', !sent.includes('c0=') && sent.includes(`c${MAX_COOKIES_PER_ORIGIN + 9}=`));
+
+	// Global cap
+	for (let o = 0; o < 10; o++) {
+		const ou = new URL(`https://origin${o}.test/`);
+		for (let i = 0; i < 40; i++) {
+			jar.receive(ou, `k${i}=v${i}; Path=/`, true, t0 + 2000 + o * 100 + i);
+		}
+	}
+	eq('jar caps global cookies', jar.size(), MAX_COOKIES_TOTAL);
+
+	// Serialize/load roundtrip
+	const json = jar.serialize(t0 + 5000);
+	ok('serialized jar respects 64KB cap', Buffer.byteLength(json, 'utf8') <= MAX_JAR_SERIALIZED_BYTES);
+	const restored = new CookieJar();
+	restored.load(json, t0 + 5000);
+	eq('restored jar preserves cookie count', restored.size(), jar.size());
+}
+
+// FrameProxy + CookieJar wiring (enabled vs disabled)
+{
+	const jar = new CookieJar();
+	let enabled = true;
+	const jp = new FrameProxy(() => false, jar, () => enabled);
+	const dshTarget = { url: new URL('http://127.0.0.1:3080/') };
+
+	// rawHeaders keeps Set-Cookie with comma in Expires intact
+	const resHeaders = jp._copyResponseHeaders(fakeRes(303, {
+		'set-cookie': ['dsh-auth=v1; Expires=Wed, 21 Oct 2099 07:28:00 GMT; Path=/; HttpOnly; SameSite=Strict'],
+	}, [
+		'Set-Cookie', 'dsh-auth=v1; Expires=Wed, 21 Oct 2099 07:28:00 GMT; Path=/; HttpOnly; SameSite=Strict',
+		'Set-Cookie', 'extra=2; Path=/',
+	]), dshTarget);
+	eq('FrameProxy with jar still strips Set-Cookie from browser response', 'set-cookie' in resHeaders, false);
+
+	const outReq = jp._outgoingHeaders(fakeReq({ cookie: 'browser=untrusted' }), dshTarget);
+	eq('FrameProxy attaches jar cookies and ignores browser cookie', outReq.cookie, 'dsh-auth=v1; extra=2');
+
+	// Toggling off disables send/receive immediately
+	enabled = false;
+	const outDisabled = jp._outgoingHeaders(fakeReq({ cookie: 'browser=untrusted' }), dshTarget);
+	eq('FrameProxy with jar disabled drops cookies as before', 'cookie' in outDisabled, false);
+}
+
+// ---------------------------------------------------------------------------
 try {
 	fs.unlinkSync(BUNDLE);
+	fs.unlinkSync(JAR_BUNDLE);
 } catch {
 	/* best effort: it is regenerated on every run */
 }
 
-const total = passed + failures.length;
-if (failures.length > 0) {
-	console.error('\n' + failures.length + ' of ' + total + ' checks FAILED:\n');
-	for (const f of failures) {
-		console.error('  FAIL ' + f);
+Promise.resolve(globalThis.__shimChecks).then(() => {
+	const total = passed + failures.length;
+	if (failures.length > 0) {
+		console.error('\n' + failures.length + ' of ' + total + ' checks FAILED:\n');
+		for (const f of failures) {
+			console.error('  FAIL ' + f);
+		}
+		process.exitCode = 1;
+	} else {
+		console.log('proxy units: all ' + total + ' checks passed');
 	}
-	process.exitCode = 1;
-} else {
-	console.log('proxy units: all ' + total + ' checks passed');
-}
+});

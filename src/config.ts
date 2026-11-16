@@ -5,6 +5,7 @@ export interface BrowserConfig {
 	retainContextWhenHidden: boolean;
 	historyLimit: number;
 	proxyEnabled: boolean;
+	proxyCookieJar: boolean;
 	acceptSelfSignedCerts: boolean;
 }
 
@@ -23,6 +24,7 @@ export function getConfig(): BrowserConfig {
 				? Math.min(10000, Math.max(1, Math.floor(rawLimit)))
 				: 200,
 		proxyEnabled: cfg.get<boolean>('proxyEnabled', false),
+		proxyCookieJar: cfg.get<boolean>('proxyCookieJar', false),
 		acceptSelfSignedCerts: cfg.get<boolean>('acceptSelfSignedCerts', true),
 	};
 }
