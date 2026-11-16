@@ -9,7 +9,7 @@
 	"browser.retainContextWhenHidden.description": "视图隐藏时保持页面状态（滚动位置、表单、JS 状态、WebSocket）。重新加载后生效。",
 	"browser.historyLimit.description": "历史记录最多保留的条数（超出删除最旧）。",
 	"browser.proxyEnabled.description": "通过本地代理加载页面，去除 frame 封锁头（X-Frame-Options / CSP frame-ancestors）。可解决「仅禁止内嵌」的站点；需要真实浏览器会话的站点（登录、重度 JS——如 PayPal、Microsoft 登录页）仍会白屏——此类站点请用「在外部浏览器中打开」。",
-	"browser.proxyCookieJar.description": "在开启 proxyEnabled 时由扩展宿主代持上游 session cookie（存于操作系统加密的 SecretStorage，不进入浏览器）。适合自建或可信的开发服务（如 dsh web）；不建议在代理浏览不可信网站时开启，因为所有经代理站点共用同一代理 origin。",
-	"browser.proxyIframeRewrite.description": "在开启 proxyEnabled 时将同站子 <iframe> 改经代理加载，使嵌套框架内的弹出窗口与外部链接也能被拦截打开。实验性 opt-in；若网站父子框架间依赖指定真实 origin 的 postMessage，开启后可能失效。",
+	"browser.proxyCookieJar.description": "在开启 proxyEnabled 时由扩展宿主按目标 origin 隔离代持上游 session cookie（存于操作系统加密的 SecretStorage，不进入浏览器）。",
+	"browser.proxyIframeRewrite.description": "在开启 proxyEnabled 时将子 <iframe>（含同站与跨站）改经代理加载，使嵌套框架内的弹出窗口与外部链接也能被拦截打开。若网站父子框架间依赖指定真实 origin 的 postMessage，可能会受影响。",
 	"browser.acceptSelfSignedCerts.description": "加载页面与可达性探测时接受自签名证书。本地 https 开发服务器请保持开启；关闭后所有请求都强制校验证书（自签名主机会显示为无法连接）。"
 }
