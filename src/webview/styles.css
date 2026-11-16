@@ -174,8 +174,7 @@ body {
 }
 
 .menu-item:hover {
-	background-color: var(--vscode-menu-selectionBackground);
-	color: var(--vscode-menu-selectionForeground);
+	background-color: var(--vscode-list-hoverBackground, var(--vscode-toolbar-hoverBackground));
 }
 
 .menu-item.danger {
