@@ -17,18 +17,19 @@
 
 ## URL 形態
 
-```
-http://127.0.0.1:<port>/p/<token>/<scheme>/<host>/<path>
+```text
+入口（bootstrap）：http://127.0.0.1:<port>/p/<token>/<scheme>/<host>/<path>
+實際運行（per-target origin）：http://t-<12hex>.localhost:<port><path>
 ```
 
-- `<token>` 讓本機其他行程無法把它當開放代理使用；`Host` 也必須是代理自己的位址（`127.0.0.1:<port>`／`localhost:<port>`），其餘回 403 並斷線，防 DNS rebinding。
-- 根相對路徑（`/_next/static/…`、`/api/…`）落在代理根上，按「上一次解析到的目標」轉發。目標 origin 由代理端拼接鎖定，請求路徑不能改寫目標：`//host`、absolute-form、反斜線一律拒絕。
-- **文檔導航 bounce**：以 `/p/<token>/…` 形式到達的 GET／HEAD 導航不在代理路徑下回應，而是 302 到目標自己的根相對路徑。iframe 的 `location.pathname` 因此永遠是目標路徑，按 pathname 路由的 SPA（opencode web UI、把 `/` 當唯一入口的 PWA）不會解析失敗。prefix 形式只來自 webview 的 bootstrap 與跨源重定向改寫，兩者本來都是導航，所以不必再判 `Sec-Fetch-Dest`。
-- 同源 3xx 改寫成根相對路徑；跨源 3xx 仍走 `/p/<token>/…` 顯式形式，再由 bounce 落到新目標的根相對路徑。
-- `dest=serviceworker` 的請求回 404。代理 origin 由所有經代理網站共用，任一個網站註冊的 Service Worker 都會存活並攔截其他網站的請求（opencode 就會註冊）。
-- 所有轉發的回應強制 `cache-control: no-store`，並移除 `expires`／`pragma`。代理 origin 共用、bounce 又讓文檔落在 `/` 這類與目標無關的 URL 上，上游任何可快取的回應（最典型是 `http → https` 的 301）被瀏覽器記住後，會劫持之後所有經過該路徑的導航。本地開發代理從瀏覽器快取得不到任何好處。
+- `<token>` 讓本機其他行程無法把它當開放代理使用；`Host` 僅放行代理自己的位址（`127.0.0.1:<port>`／`localhost:<port>`）以及已註冊在代理表中的 `t-<12hex>.localhost:<port>`，其餘回 403 並斷線，防 DNS rebinding。
+- **Per-Target Origin bounce（v0.5.0）**：每個真實目標 Origin（`scheme://host[:port]`）1 對 1 對應到確定性的 `http://t-<12hex>.localhost:<port>`（`sha256(origin)` 前 12 碼）。以 `/p/<token>/…` 到達的 GET／HEAD 導航會註冊該目標並 302 到對應的 `t-<12hex>.localhost:<port>`，因此 iframe 的 `location.pathname` 永遠是目標路徑，按 pathname 路由的 SPA（opencode web UI、把 `/` 當唯一入口的 PWA）不會解析失敗，且多網站／多框架並存時不再互搶 `_lastTarget`。
+- 根相對路徑（`/_next/static/…`、`/api/…`）直接依請求的 `Host` 標頭查表轉發至對應目標。目標 origin 由代理端鎖定，請求路徑不能改寫目標：`//host`、absolute-form、反斜線一律拒絕。
+- 同源 3xx 改寫成根相對路徑；跨源 3xx 預先註冊新目標並改寫為目標自己的 `http://t-<newId>.localhost:<port>/…`。
+- `dest=serviceworker` 的請求維持回 404（避免離線快取與代理重寫層衝突）。
+- **恢復上游快取（v0.5.0）**：各站台已擁有獨立的 `t-<12hex>.localhost:<port>` 瀏覽器快取分區，代理不再對一般資源強制覆寫 `cache-control: no-store`（僅 `/p/<token>/…` 的 302 bounce 本身保持 `no-store`），大型 SPA 的 JS/CSS bundle 可正常命中瀏覽器快取。
 - 探測回報 status ≥ 400 且 body 近乎空時，面板顯示 HTTP 錯誤頁而不是白屏（bot 防護站對 iframe 常回空的 403／404）。站台自己帶內容的錯誤頁照常渲染；4xx 不啟動自動重連，5xx 會。
-- Port 記在 globalState 並優先重用，被佔用或開第二個視窗時退回隨機 port。port 固定，代理 origin 就固定，內嵌頁的 localStorage（例如 opencode 的配對 token）才能跨重啟存活。
+- Port 記在 globalState 並優先重用，被佔用或開第二個視窗時退回隨機 port。搭配確定性的 `t-<12hex>`，同一站台跨重啟的 Origin 固定，內嵌頁的 `localStorage`（例如 opencode 的配對 token）與快取才能跨重啟存活。
 - 地址欄永遠顯示目標 URL，不顯示代理 URL。
 
 ## 請求頭
@@ -108,7 +109,7 @@ CDN 只對站台的真實 origin 發 `Access-Control-Allow-Origin`。頁面若�
 
 補上瀏覽器端 cookie 轉發只對靠伺服器端 session 的普通站台有用（Django、Rails、PHP 那種），對第 3 層的硬否決照樣無效，而共用 origin 會帶進一批新邊界：domain 衝突、`HttpOnly` 失去意義、兩個站台互相看到對方的 cookie。因此**瀏覽器端轉發維持不做**。
 
-**代理端 cookie jar（opt-in，`browser.proxyCookieJar`，預設關閉）**：若需要維持伺服器端 session cookie（如自架工具 `dsh web`、Django/Rails/PHP 等開發伺服器），可開啟 `browser.proxyCookieJar`。`Set-Cookie` 仍不轉發給瀏覽器，而是由擴充宿主在 `CookieJar` 中按目標 origin 自持並存入作業系統加密的 `SecretStorage`（跨 VS Code 重啟存活），出站請求再由代理組裝 `Cookie` 標頭；可用指令 **Clear Proxied Logins**（`browser.clearProxiedLogins`）清除。威脅模型限制：因所有經代理站台共用同一代理 origin，已載入的頁面理論上可透過顯式 `/p/<token>/…` 路徑讀取其他目標的已認證內容，故**不建議在代理瀏覽不可信網站時開啟**。
+**代理端 cookie jar（`browser.proxyCookieJar`，v0.5.0 起預設開啟）**：可維持伺服器端 session cookie（如自架工具 `dsh web`、Django/Rails/PHP 等開發伺服器）。`Set-Cookie` 仍不轉發給瀏覽器，而是由擴充宿主在 `CookieJar` 中按目標 origin 自持並存入作業系統加密的 `SecretStorage`（跨 VS Code 重啟存活），出站請求再由代理組裝 `Cookie` 標頭；可用指令 **Clear Proxied Logins**（`browser.clearProxiedLogins`）清除，或在設定中關閉。在 Per-Target Origin 架構下，各站台皆有獨立的 `t-<12hex>.localhost:<port>`，不再有共用 Origin 跨站互讀 cookie jar 的問題。
 
 未開啟 `browser.proxyCookieJar` 時，登入能成立的情況只有一種：關掉代理，且站台本身允許被內嵌。cookie 存在 webview 的 Electron session 裡，跨 hide／show、Close／Reopen、編輯器重啟都在，只有「Developer: Clear Webview Storage」或站台自己的過期會清掉。需要外部身分的流程一律用選單的 **Open in external browser**。
 
@@ -123,25 +124,25 @@ CDN 只對站台的真實 origin 發 `Access-Control-Allow-Origin`。頁面若�
 
 轉送因此一律先送字串，宿主拒收才退回 `Uri.parse(...)`。把 `%3F` 還原成 `?` 的補償寫法不可行：那會改動 URL 本體，遇到位元組完全一致的簽名式網址就會壞。
 
-## 子框架涵蓋（opt-in，`browser.proxyIframeRewrite`，預設關閉）
+## 子框架涵蓋（`browser.proxyIframeRewrite`，v0.5.0 起預設開啟）
 
-代理模式下，頁面自己內嵌的**同站子 `<iframe>`** 若以真實 origin 載入，會繞過 proxy 而沒有 shim，裡面的 `window.open`／`target=_blank` 會撞上外層 webview 沙箱（無 `allow-popups`）被擋。開啟 `browser.proxyIframeRewrite`（需同時開啟 `browser.proxyEnabled`）後：
+代理模式下，頁面自己內嵌的子 `<iframe>`（無論同站或跨站 `http(s)://`）若以真實 origin 載入，會繞過 proxy 而沒有 shim，裡面的 `window.open`／`target=_blank` 會撞上外層 webview 沙箱（無 `allow-popups`）被擋。`browser.proxyIframeRewrite`（需同時開啟 `browser.proxyEnabled`）開啟後：
 
-1. **HTML 與動態 DOM 改寫**：代理端（`_rewriteIframeSrcs`）與 shim（sweep、`MutationObserver`、`HTMLIFrameElement`/`HTMLFrameElement` 的 `src` setter patch）會將同站子 iframe 的 `src` 改寫為**根相對路徑**（不走 `/p/<token>/...` 前綴，避免被 302 bounce 彈回），讓子框架也經過 proxy 並取得 shim。
+1. **HTML 與動態 DOM 改寫**：代理端（`_rewriteIframeSrcs`）與 shim（sweep、`MutationObserver`、`HTMLIFrameElement`/`HTMLFrameElement` 的 `src` setter patch）會將同站子 iframe 改寫為根相對路徑、將跨站 `http(s)://` 子 iframe 改寫為各自獨立的 `t-<child>.localhost:<port>`（動態建立經 `/p/<token>/…` 302 落地），使每層子框架都能經過 proxy 並取得 shim。
 2. **多層上拋（不污染網址列）**：每層 shim 安裝 `message` relay listener，將子框架的 `openExternal` 與 `copy` 逐級上拋至頂層；明確不轉發 `pageNavigated`，避免子框架導航污染網址列與前進／後退堆疊。
-3. **已知邊界**：僅改寫同站子 iframe（跨站維持直連）；不處理 `srcdoc`／`about:blank` + `document.write`；若父頁以顯式真實 origin 呼叫 `postMessage(msg, 'https://...')`，改寫後因 origin 變成 proxy origin 而會遺失訊息，故初版預設關閉。詳見 [IFRAME-SHIM-DESIGN.md](IFRAME-SHIM-DESIGN.md)。
+3. **非架構級的小邊角（視需要局部補即可）**：不處理 `srcdoc`／`about:blank` + `document.write`（避免干擾沙箱與文件寫入流程，詳見 [IFRAME-SHIM-DESIGN.md](IFRAME-SHIM-DESIGN.md)）；`SHIM_JS` 的點擊監聽沿 `e.target` 往父節點尋找 `<a>`，未穿透 Shadow DOM（真遇到時改用 `e.composedPath()` 即可）。
 
-## 仍然做不到的
+## 仍然做不到的（VS Code Webview 平台硬邊界 vs 實作取捨）
 
-- **把 localhost 當開發環境的站台會走 dev 分支**，因為代理模式下每個頁面都在 `127.0.0.1`。`antigravity.google.com` 的藍色 Sign in 按鈕就是例子：`signIn()` 整段內容在 `protocol!=="http:" || !isLocalhost(hostname)` 條件下，條件在代理環境永遠不成立，函式等於空的。`window.location` 無法偽造（重新定義會拋 `TypeError`，`href` 存取子不可配置），只有 `Location.prototype.assign`／`replace` 可包，所以 shim 也攔不到 `location.href = …`。
+以下屬於擴充宿主（VS Code Webview `<iframe>`）與瀏覽器安全模型的先天邊界，**並非代理架構缺陷**（詳見 [PER-TARGET-ORIGIN-DESIGN.md](PER-TARGET-ORIGIN-DESIGN.md)）：
+
+- **把 localhost 當開發環境或檢查真實 `https://` Origin 的站台**：因為代理模式下頁面在 `http://t-<12hex>.localhost:<port>`。例如 `antigravity.google.com` 的藍色 Sign in 按鈕在非真實 `https://` 環境下會走空分支；而 `window.location` 與 `Location.prototype.href` 在瀏覽器規範中為不可配置屬性（重新定義會拋 `TypeError`），shim 無法攔截 `location.href = …` 直接賦值。
+- **第三方 OAuth／系統瀏覽器憑證回流／顯式真實 `targetOrigin` 的跨框架 `postMessage`**：OAuth `redirect_uri` 鎖死真實網域、系統瀏覽器與 Webview session 隔離，且改寫後的子 iframe origin 為 `t-<id>.localhost:<port>`。
+- **Webview 宿主硬體與權限限制**：外層沙箱無 `allow-popups`／`allow-top-navigation`，`Permissions-Policy` 擋下 WebUSB／WebBluetooth／通知／支付等 API，以及 WebRTC／BYOA 遠端連線策略限制。
 - 頁面用 `<form target="_top|_blank">`、`<meta http-equiv="refresh">`、`<area>`、腳本裡的 `form.submit()` 離開 frame 時，shim 不介入，行為與 sandbox 預設相同。
-- JS 寫死的絕對 `https://` URL 會繞過代理。
-- 同時只服務一個 iframe（單一 `_lastTarget`），根相對請求按最後解析到的目標轉發。
-- 跨源 iframe 讀不到 `contentWindow.location`，地址欄跟的是 iframe 的 `src` 屬性，站內再導航時可能仍顯示你輸入的 URL。
-- `base-uri 'self'` 會擋掉頁面自己的 `<base>`；相對 URL 於是以代理 origin 解析並按 last target 轉發，取到的資源正確，所以不改這條 directive。
-- 需要 `Access-Control-Allow-Credentials` **加上**站台 cookie 的跨源 XHR（`ogads-pa.clients6.google.com`）與遙測（`play.google.com/log`）不可能成功，但都不影響渲染。
-- Service Worker 在 webview 內不執行。
+- JS 寫死的絕對 `https://` `fetch`/XHR URL 會直接發往上游，受站台 CORS 限制（例如需 `Access-Control-Allow-Credentials` 加上站台 cookie 的跨源遙測請求）。
+- Service Worker 在代理模式下刻意回 404（不執行）。
 
 ## 測試
 
-`npm test` 跑 `test/proxy-units.js`：用專案自己的 esbuild 打包 `src/proxy.ts` 再斷言，測的是出貨碼。涵蓋 CSP 政策清單與 nonce 抬升、`crossorigin` 剝離、shim 注入點與它能否被編譯、`Sec-Fetch-Dest` 映射、SSRF 拒絕、`Next-Url`／`Referer` 映射、防快取污染標頭、重定向改寫。
+`npm test` 跑 `test/proxy-units.js`（150 項檢查）與 `test/webview-units.js`（70 項檢查）：用專案自己的 esbuild 打包 `src/proxy.ts` 再斷言，測的是出貨碼。涵蓋 `t-<12hex>.localhost` 目標隔離與 Host 防護、CSP 政策清單與 nonce 抬升、`crossorigin` 剝離、shim 注入點與多層 relay、`Sec-Fetch-Dest` 映射、SSRF 拒絕、`Next-Url`／`Referer` 映射、CookieJar、重定向改寫與上游快取保留。
