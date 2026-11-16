@@ -274,7 +274,7 @@ export class CookieJar {
 	}
 
 	/** Restore jar state from serialized JSON. Malformed input is ignored safely. */
-	load(json: string, now = Date.now()): void {
+	load(json: string, now = Date.now(), merge = false): void {
 		if (!json || typeof json !== 'string') {
 			return;
 		}
@@ -288,12 +288,14 @@ export class CookieJar {
 			return;
 		}
 
-		this._origins.clear();
+		if (!merge) {
+			this._origins.clear();
+		}
 		for (const [origin, list] of Object.entries(parsed as Record<string, unknown>)) {
 			if (!Array.isArray(list)) {
 				continue;
 			}
-			const originMap = new Map<string, StoredCookie>();
+			const originMap = (merge && this._origins.get(origin)) || new Map<string, StoredCookie>();
 			for (const item of list) {
 				if (!item || typeof item !== 'object') {
 					continue;
@@ -321,6 +323,9 @@ export class CookieJar {
 					continue;
 				}
 				const key = cookieKey(c.name, c.domain, c.path);
+				if (merge && originMap.has(key)) {
+					continue;
+				}
 				originMap.set(key, {
 					name: c.name,
 					value: c.value,

@@ -517,12 +517,20 @@ eq('pathMatch /foo vs /foo is true', pathMatch('/foo', '/foo'), true);
 	}
 	eq('jar caps global cookies', jar.size(), MAX_COOKIES_TOTAL);
 
-	// Serialize/load roundtrip
+	// Serialize/load roundtrip + merge mode (startup race protection)
 	const json = jar.serialize(t0 + 5000);
 	ok('serialized jar respects 64KB cap', Buffer.byteLength(json, 'utf8') <= MAX_JAR_SERIALIZED_BYTES);
 	const restored = new CookieJar();
 	restored.load(json, t0 + 5000);
 	eq('restored jar preserves cookie count', restored.size(), jar.size());
+
+	const raced = new CookieJar();
+	const racedUrl = new URL('https://origin0.test/');
+	raced.receive(racedUrl, 'k0=newer; Path=/', true, t0 + 6000);
+	raced.load(json, t0 + 6000, true);
+	eq('merge load preserves newer in-memory cookie while restoring others',
+		raced.send(racedUrl, true, t0 + 6001).split('; ').includes('k0=newer'), true);
+	eq('merge load restores remaining persisted cookies', raced.size(), MAX_COOKIES_TOTAL);
 }
 
 // FrameProxy + CookieJar wiring (enabled vs disabled)

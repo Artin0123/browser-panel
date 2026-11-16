@@ -30,8 +30,8 @@ export function activate(context: vscode.ExtensionContext): void {
 	});
 	void Promise.resolve(context.secrets.get(PROXY_COOKIE_JAR_KEY))
 		.then((raw) => {
-			if (raw && !jarDirty) {
-				cookieJar.load(raw);
+			if (raw) {
+				cookieJar.load(raw, Date.now(), jarDirty);
 			}
 		})
 		.catch(() => {});

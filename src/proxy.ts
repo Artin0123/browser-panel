@@ -144,6 +144,12 @@ export const SHIM_JS =
 	// "denied", or document.execCommand("copy") return false). Fall back to
 	// extension-host vscode.env.clipboard.writeText via postMessage.
 	'var clipCopy=function(t){send("copy",{text:String(t)})};' +
+	'var writeItems=function(items){' +
+	'var arr=Array.isArray(items)?items:Array.from(items||[]);' +
+	'for(var i=0;i<arr.length;i++){var it=arr[i];' +
+	'if(it&&it.types&&it.types.indexOf("text/plain")!==-1&&it.getType){' +
+	'return Promise.resolve(it.getType("text/plain")).then(function(b){return b.text()}).then(function(t){clipCopy(t)})' +
+	'}}return null};' +
 	'try{' +
 	'var clip=navigator.clipboard;' +
 	'if(clip){' +
@@ -158,12 +164,7 @@ export const SHIM_JS =
 	'var wr=clip.write.bind(clip);' +
 	'clip.write=function(items){' +
 	'var fallback=function(err){' +
-	'try{var arr=Array.isArray(items)?items:Array.from(items||[]);' +
-	'for(var i=0;i<arr.length;i++){var it=arr[i];' +
-	'if(it&&it.types&&it.types.indexOf("text/plain")!==-1&&it.getType){' +
-	'return Promise.resolve(it.getType("text/plain")).then(function(b){return b.text()}).then(function(t){clipCopy(t)})' +
-	'}}' +
-	'}catch(e){}return Promise.reject(err)' +
+	'try{var p=writeItems(items);if(p)return p}catch(e){}return Promise.reject(err)' +
 	'};' +
 	'try{return Promise.resolve(wr(items)).catch(fallback)}catch(e){return fallback(e)}' +
 	'}' +
@@ -172,12 +173,8 @@ export const SHIM_JS =
 	'Object.defineProperty(navigator,"clipboard",{configurable:true,value:{' +
 	'writeText:function(text){clipCopy(text);return Promise.resolve()},' +
 	'write:function(items){' +
-	'try{var arr=Array.isArray(items)?items:Array.from(items||[]);' +
-	'for(var i=0;i<arr.length;i++){var it=arr[i];' +
-	'if(it&&it.types&&it.types.indexOf("text/plain")!==-1&&it.getType){' +
-	'return Promise.resolve(it.getType("text/plain")).then(function(b){return b.text()}).then(function(t){clipCopy(t)})' +
-	'}}' +
-	'}catch(e){}return Promise.reject(new DOMException("Clipboard write failed","NotAllowedError"))' +
+	'try{var p=writeItems(items);if(p)return p}catch(e){}' +
+	'return Promise.reject(new DOMException("Clipboard write failed","NotAllowedError"))' +
 	'}}})' +
 	'}' +
 	'}catch(e){}' +
@@ -614,16 +611,17 @@ export class FrameProxy {
 		preq.end();
 	}
 
-	private _rawSetCookies(res: http.IncomingMessage): string[] {
+	private _rawHeaderValues(res: http.IncomingMessage, headerName: string): string[] {
+		const target = headerName.toLowerCase();
 		const values: string[] = [];
 		const raw = res.rawHeaders || [];
 		for (let i = 0; i + 1 < raw.length; i += 2) {
-			if (raw[i].toLowerCase() === 'set-cookie') {
+			if (raw[i].toLowerCase() === target) {
 				values.push(raw[i + 1]);
 			}
 		}
 		if (values.length === 0) {
-			const v = res.headers['set-cookie'];
+			const v = res.headers[target];
 			if (typeof v === 'string') values.push(v);
 			else if (Array.isArray(v)) values.push(...v);
 		}
@@ -635,7 +633,7 @@ export class FrameProxy {
 			return;
 		}
 		const isHttps = target.url.protocol === 'https:';
-		for (const sc of this._rawSetCookies(res)) {
+		for (const sc of this._rawHeaderValues(res, 'set-cookie')) {
 			this._cookieJar.receive(target.url, sc, isHttps);
 		}
 	}
@@ -786,18 +784,7 @@ export class FrameProxy {
 	 * comma split then recovers policies that were packed into one value.
 	 */
 	private _cspPolicies(pres: http.IncomingMessage): string[] {
-		const values: string[] = [];
-		const raw = pres.rawHeaders || [];
-		for (let i = 0; i + 1 < raw.length; i += 2) {
-			if (raw[i].toLowerCase() === 'content-security-policy') {
-				values.push(raw[i + 1]);
-			}
-		}
-		if (values.length === 0) {
-			const v = pres.headers['content-security-policy'];
-			if (typeof v === 'string') values.push(v);
-			else if (Array.isArray(v)) values.push(...v);
-		}
+		const values = this._rawHeaderValues(pres, 'content-security-policy');
 		return FrameProxy._splitCspList(values)
 			.map((p) =>
 				p
