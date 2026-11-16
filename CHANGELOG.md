@@ -5,6 +5,7 @@
 ### Added
 
 - Proxy: opt-in extension-host cookie jar (`browser.proxyCookieJar`, default `false`) that holds upstream `Set-Cookie` sessions per target origin in OS-encrypted `SecretStorage` without exposing cookies to the browser, plus the **Browser: Clear Proxied Logins** (`browser.clearProxiedLogins`) command. Intended for trusted/self-hosted dev servers (not recommended when browsing untrusted sites through the proxy).
+- Proxy: opt-in same-origin child `<iframe>` rewriting (`browser.proxyIframeRewrite`, default `false`) so nested frames receive the shim and relay `window.open` / `target=_blank` / clipboard writes upward without polluting URL tracking (`pageNavigated` is not relayed).
 
 ### Changed
 

@@ -84,6 +84,11 @@
           "default": false,
           "description": "%browser.proxyCookieJar.description%"
         },
+        "browser.proxyIframeRewrite": {
+          "type": "boolean",
+          "default": false,
+          "description": "%browser.proxyIframeRewrite.description%"
+        },
         "browser.acceptSelfSignedCerts": {
           "type": "boolean",
           "default": true,

@@ -45,7 +45,8 @@ export function activate(context: vscode.ExtensionContext): void {
 	const proxy = new FrameProxy(
 		() => getConfig().acceptSelfSignedCerts,
 		cookieJar,
-		() => getConfig().proxyCookieJar
+		() => getConfig().proxyCookieJar,
+		() => getConfig().proxyIframeRewrite
 	);
 	const PROXY_PORT_KEY = 'browser.proxyPort';
 	context.subscriptions.push({

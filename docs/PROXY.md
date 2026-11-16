@@ -123,6 +123,14 @@ CDN 只對站台的真實 origin 發 `Access-Control-Allow-Origin`。頁面若�
 
 轉送因此一律先送字串，宿主拒收才退回 `Uri.parse(...)`。把 `%3F` 還原成 `?` 的補償寫法不可行：那會改動 URL 本體，遇到位元組完全一致的簽名式網址就會壞。
 
+## 子框架涵蓋（opt-in，`browser.proxyIframeRewrite`，預設關閉）
+
+代理模式下，頁面自己內嵌的**同站子 `<iframe>`** 若以真實 origin 載入，會繞過 proxy 而沒有 shim，裡面的 `window.open`／`target=_blank` 會撞上外層 webview 沙箱（無 `allow-popups`）被擋。開啟 `browser.proxyIframeRewrite`（需同時開啟 `browser.proxyEnabled`）後：
+
+1. **HTML 與動態 DOM 改寫**：代理端（`_rewriteIframeSrcs`）與 shim（sweep、`MutationObserver`、`HTMLIFrameElement`/`HTMLFrameElement` 的 `src` setter patch）會將同站子 iframe 的 `src` 改寫為**根相對路徑**（不走 `/p/<token>/...` 前綴，避免被 302 bounce 彈回），讓子框架也經過 proxy 並取得 shim。
+2. **多層上拋（不污染網址列）**：每層 shim 安裝 `message` relay listener，將子框架的 `openExternal` 與 `copy` 逐級上拋至頂層；明確不轉發 `pageNavigated`，避免子框架導航污染網址列與前進／後退堆疊。
+3. **已知邊界**：僅改寫同站子 iframe（跨站維持直連）；不處理 `srcdoc`／`about:blank` + `document.write`；若父頁以顯式真實 origin 呼叫 `postMessage(msg, 'https://...')`，改寫後因 origin 變成 proxy origin 而會遺失訊息，故初版預設關閉。詳見 [IFRAME-SHIM-DESIGN.md](IFRAME-SHIM-DESIGN.md)。
+
 ## 仍然做不到的
 
 - **把 localhost 當開發環境的站台會走 dev 分支**，因為代理模式下每個頁面都在 `127.0.0.1`。`antigravity.google.com` 的藍色 Sign in 按鈕就是例子：`signIn()` 整段內容在 `protocol!=="http:" || !isLocalhost(hostname)` 條件下，條件在代理環境永遠不成立，函式等於空的。`window.location` 無法偽造（重新定義會拋 `TypeError`，`href` 存取子不可配置），只有 `Location.prototype.assign`／`replace` 可包，所以 shim 也攔不到 `location.href = …`。

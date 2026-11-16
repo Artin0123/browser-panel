@@ -144,7 +144,7 @@ The Clipboard API has been blocked because of a permissions policy...
 | # | 議題 | 定案 |
 |---|------|------|
 | 1 | proxy 模式下 opencode（v2.2.0）整頁 `TypeError: Cannot read properties of undefined (reading 'type')` | **已修**：文檔導航 bounce——以 `/p/<token>/...` 形式到達的 GET/HEAD 文檔導航（`Sec-Fetch-Dest: document/iframe/frame`）302 到目標自己的根相對路徑，讓 iframe 的 `location.pathname` 永遠是目標路徑、不是代理前綴 |
-| 2 | 直連模式點外部連結被擋（`allow-popups` not set） | **不可修（直連）**：VS Code webview 外層 sandboxed iframe 未開 `allow-popups`，sandbox 旗標被巢狀 iframe 繼承且子層只能加嚴、extension 無法放寬。出路 = proxy shim 攔截（修好問題一即生效）或選單「在外部瀏覽器開啟」 |
+| 2 | 直連模式點外部連結被擋（`allow-popups` not set） | **不可修（直連）**：VS Code webview 外層 sandboxed iframe 未開 `allow-popups`，sandbox 旗標被巢狀 iframe 繼承且子層只能加嚴、extension 無法放寬。出路 = proxy shim 攔截（修好問題一即生效）或選單「在外部瀏覽器開啟」；若為代理頁面內嵌的**同站子 iframe**，可開啟 opt-in 設定 `browser.proxyIframeRewrite`（見 [IFRAME-SHIM-DESIGN.md](IFRAME-SHIM-DESIGN.md)） |
 | 3 | proxy port 隨機 → localStorage（opencode 配對 token／主題）每次重開 VS Code 就清空 | **已修**：sticky port——綁定過的 port 記在 globalState 並在下次 start 重用；被佔用時自動 fallback 隨機 port |
 | 4 | 偶發：第一次載入 VS Code 面板整個白畫面，無錯誤視窗、不會自動重試、無法穩定重現 | **已加防護**（無法在擴展端根治 VS Code webview 偶發載入失敗，但可自癒）：webview 端重試 `getConfig`（治訊息丟失）；host 端 10s 靜默後強制重載 webview（上限 2 次，治腳本沒跑起來）；無效 URL 改顯示錯誤頁而非靜默白框 |
 

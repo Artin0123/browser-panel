@@ -100,8 +100,10 @@ export const SHIM_JS =
 	'if(!u)return null;' +
 	'try{var x=new URL(u,location.href);' +
 	'if(x.origin===location.origin)return x.href;' +
-	'if(bp.origin&&x.origin===bp.origin&&bp.prefix)' +
-	'return location.origin+bp.prefix+x.protocol.slice(0,-1)+"/"+x.host+x.pathname+x.search+x.hash' +
+	'if(bp.origin&&x.origin===bp.origin){' +
+	'if(bp.prefix)return location.origin+bp.prefix+x.protocol.slice(0,-1)+"/"+x.host+x.pathname+x.search+x.hash;' +
+	'return location.origin+x.pathname+x.search+x.hash' +
+	'}' +
 	'}catch(e){}' +
 	'return null' +
 	'}' +
@@ -222,6 +224,54 @@ export const SHIM_JS =
 	'return sa.apply(this,arguments)' +
 	'};' +
 	'}catch(e){}' +
+	// Opt-in child iframe coverage (browser.proxyIframeRewrite): rewrite
+	// same-origin child iframe src to root-relative so they load through the
+	// proxy and receive this shim, then relay openExternal/copy upward (never
+	// pageNavigated, so child frames cannot pollute the URL bar/history).
+	'if(bp.iframeRewrite&&bp.origin){' +
+	'var rewriteIfSrc=function(u){' +
+	'if(!u||typeof u!=="string")return null;' +
+	'var s=u.trim();' +
+	'if(!s||(s.charAt(0)==="/"&&s.charAt(1)!=="/"))return null;' +
+	'if(bp.prefix&&s.lastIndexOf(bp.prefix,0)===0)return null;' +
+	'if(/^(about|javascript|data|blob|mailto|tel):/i.test(s))return null;' +
+	'try{var x=new URL(s,document.baseURI||location.href);' +
+	'if((x.protocol==="http:"||x.protocol==="https:")&&x.origin===bp.origin){return x.pathname+x.search+x.hash}' +
+	'}catch(e){}return null' +
+	'};' +
+	'var sweepIframe=function(el){' +
+	'if(!el||!el.getAttribute)return;' +
+	'var r=rewriteIfSrc(el.getAttribute("src"));' +
+	'if(r!==null&&el.getAttribute("src")!==r)el.setAttribute("src",r)' +
+	'};' +
+	'try{' +
+	'var ifs=document.querySelectorAll("iframe,frame");' +
+	'for(var i=0;i<ifs.length;i++)sweepIframe(ifs[i]);' +
+	'if(typeof MutationObserver!=="undefined"){' +
+	'new MutationObserver(function(muts){' +
+	'for(var i=0;i<muts.length;i++){var m=muts[i];' +
+	'if(m.type==="attributes"){sweepIframe(m.target);continue}' +
+	'var added=m.addedNodes;for(var j=0;j<added.length;j++){var n=added[j];' +
+	'if(!n||n.nodeType!==1)continue;' +
+	'if(n.tagName==="IFRAME"||n.tagName==="FRAME")sweepIframe(n);' +
+	'if(n.querySelectorAll){var sub=n.querySelectorAll("iframe,frame");for(var k=0;k<sub.length;k++)sweepIframe(sub[k])}' +
+	'}}' +
+	'}).observe(document.documentElement||document,{childList:true,subtree:true,attributes:true,attributeFilter:["src"]})' +
+	'}' +
+	'["HTMLIFrameElement","HTMLFrameElement"].forEach(function(n){' +
+	'var c=window[n];if(!c||!c.prototype)return;' +
+	'var d=Object.getOwnPropertyDescriptor(c.prototype,"src");' +
+	'if(d&&d.set)Object.defineProperty(c.prototype,"src",{configurable:true,enumerable:d.enumerable,get:d.get,' +
+	'set:function(v){var r=rewriteIfSrc(v);return d.set.call(this,r!==null?r:v)}})' +
+	'})' +
+	'}catch(e){}' +
+	'window.addEventListener("message",function(e){' +
+	'if(!e||e.source===window)return;' +
+	'var d=e.data;if(!d||typeof d.type!=="string")return;' +
+	'if(d.type==="openExternal"&&typeof d.url==="string"&&d.url){send("openExternal",{url:d.url})}' +
+	'else if(d.type==="copy"&&typeof d.text==="string"){send("copy",{text:d.text})}' +
+	'})' +
+	'}' +
 	'})();';;
 
 const DROP_REQUEST_HEADERS = new Set([
@@ -272,7 +322,8 @@ export class FrameProxy {
 	constructor(
 		private readonly _acceptSelfSigned: () => boolean,
 		private readonly _cookieJar?: CookieJar,
-		private readonly _cookieJarEnabled: () => boolean = () => Boolean(_cookieJar)
+		private readonly _cookieJarEnabled: () => boolean = () => Boolean(_cookieJar),
+		private readonly _iframeRewriteEnabled: () => boolean = () => false
 	) { }
 
 	get baseUrl(): string {
@@ -860,11 +911,52 @@ export class FrameProxy {
 
 	/** Shim script URL carrying the per-document target mapping in ?bp=. */
 	private _shimSrc(target: ProxyTarget): string {
-		const bp = JSON.stringify({
+		const bp: Record<string, unknown> = {
 			origin: this._targetOrigin(target),
 			prefix: '/p/' + this._token + '/',
-		}).replace(/</g, '\\u003c');
-		return this._shimPath + '?bp=' + encodeURIComponent(bp);
+		};
+		if (this._iframeRewriteEnabled()) {
+			bp.iframeRewrite = true;
+		}
+		const raw = JSON.stringify(bp).replace(/</g, '\\u003c');
+		return this._shimPath + '?bp=' + encodeURIComponent(raw);
+	}
+
+	/**
+	 * Opt-in child iframe rewrite (browser.proxyIframeRewrite): rewrite same-origin
+	 * absolute <iframe src> values to root-relative paths so nested frames also
+	 * load through the proxy (and receive the shim) instead of bypassing it.
+	 * Cross-origin iframes, /p/ prefix URLs, root-relative paths, srcdoc, and
+	 * non-http(s) schemes are left untouched.
+	 */
+	private _rewriteIframeSrcs(html: string, target: ProxyTarget): string {
+		if (!/<iframe\b/i.test(html)) {
+			return html;
+		}
+		const targetOrigin = this._targetOrigin(target);
+		const prefix = '/p/' + this._token + '/';
+		return html.replace(/<iframe\b[^>]*>/gi, (tag) =>
+			tag.replace(/(\ssrc\s*=\s*)(?:"([^"]*)"|'([^']*)'|([^\s>]+))/i, (full, attrPrefix, dq, sq, uq) => {
+				const raw = String(dq ?? sq ?? uq ?? '').trim();
+				if (!raw || (raw.startsWith('/') && !raw.startsWith('//')) || raw.startsWith(prefix)) {
+					return full;
+				}
+				if (/^(about|javascript|data|blob|mailto|tel):/i.test(raw)) {
+					return full;
+				}
+				try {
+					const u = new URL(raw, target.url);
+					if ((u.protocol === 'http:' || u.protocol === 'https:') && u.origin === targetOrigin) {
+						const rewritten = u.pathname + u.search + u.hash;
+						const quote = dq !== undefined ? '"' : sq !== undefined ? "'" : '"';
+						return attrPrefix + quote + rewritten + quote;
+					}
+				} catch {
+					// malformed URL: fail-safe, keep untouched
+				}
+				return full;
+			})
+		);
 	}
 
 	/**
@@ -904,7 +996,10 @@ export class FrameProxy {
 		const { policies, nonce } = this._cspForShim(FrameProxy._splitCspList(cspIn));
 		const nonceAttr = nonce ? ' nonce="' + nonce + '"' : '';
 		const tag = '<script' + nonceAttr + ' src="' + this._shimSrc(target) + '"></script>';
-		const s = this._stripCrossOrigin(html.toString('utf8'));
+		let s = this._stripCrossOrigin(html.toString('utf8'));
+		if (this._iframeRewriteEnabled()) {
+			s = this._rewriteIframeSrcs(s, target);
+		}
 		// <head> (not a prefix match — <header> would false-positive).
 		let m = /<head(\s[^>]*)?>/i.exec(s);
 		if (m) {

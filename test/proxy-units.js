@@ -559,6 +559,123 @@ eq('pathMatch /foo vs /foo is true', pathMatch('/foo', '/foo'), true);
 }
 
 // ---------------------------------------------------------------------------
+// Child iframe rewrite & shim relay (browser.proxyIframeRewrite).
+// ---------------------------------------------------------------------------
+{
+	const irp = new FrameProxy(() => false, undefined, () => false, () => true);
+	irp._port = 4599;
+	const IR_TOK = irp._token;
+
+	// _rewriteIframeSrcs cases
+	eq('_rewriteIframeSrcs rewrites same-origin double-quoted src',
+		irp._rewriteIframeSrcs('<iframe src="https://site.test/sub/a?x=1#h"></iframe>', TARGET),
+		'<iframe src="/sub/a?x=1#h"></iframe>');
+	eq('_rewriteIframeSrcs rewrites same-origin single-quoted src',
+		irp._rewriteIframeSrcs("<IFRAME id='f' SRC='https://site.test/b'></IFRAME>", TARGET),
+		"<IFRAME id='f' SRC='/b'></IFRAME>");
+	eq('_rewriteIframeSrcs rewrites same-origin unquoted src',
+		irp._rewriteIframeSrcs('<iframe src=https://site.test/c></iframe>', TARGET),
+		'<iframe src="/c"></iframe>');
+	eq('_rewriteIframeSrcs leaves cross-origin iframe alone',
+		irp._rewriteIframeSrcs('<iframe src="https://accounts.google.com/o/oauth2"></iframe>', TARGET),
+		'<iframe src="https://accounts.google.com/o/oauth2"></iframe>');
+	eq('_rewriteIframeSrcs leaves /p/ prefix, root-relative, srcdoc, about:blank, javascript:, data-src alone',
+		irp._rewriteIframeSrcs(
+			`<iframe src="/p/${IR_TOK}/https/site.test/x"></iframe>` +
+			'<iframe src="/already"></iframe>' +
+			'<iframe srcdoc="<p>hi</p>"></iframe>' +
+			'<iframe src="about:blank"></iframe>' +
+			'<iframe src="javascript:void(0)"></iframe>' +
+			'<iframe data-src="https://site.test/lazy"></iframe>' +
+			'<iframe></iframe>',
+			TARGET
+		),
+		`<iframe src="/p/${IR_TOK}/https/site.test/x"></iframe>` +
+		'<iframe src="/already"></iframe>' +
+		'<iframe srcdoc="<p>hi</p>"></iframe>' +
+		'<iframe src="about:blank"></iframe>' +
+		'<iframe src="javascript:void(0)"></iframe>' +
+		'<iframe data-src="https://site.test/lazy"></iframe>' +
+		'<iframe></iframe>');
+	eq('_rewriteIframeSrcs survives malformed URL',
+		irp._rewriteIframeSrcs('<iframe src="http://[::1"></iframe>', TARGET),
+		'<iframe src="http://[::1"></iframe>');
+
+	// Opt-in gating in _injectShimTag & _shimSrc
+	const disabledHtml = p._injectShimTag(Buffer.from('<head></head><iframe src="https://site.test/sub"></iframe>'), TARGET, undefined).html.toString('utf8');
+	ok('iframeRewrite off leaves same-origin iframe untouched', disabledHtml.includes('src="https://site.test/sub"'), disabledHtml);
+	const enabledHtml = irp._injectShimTag(Buffer.from('<head></head><iframe src="https://site.test/sub"></iframe>'), TARGET, undefined).html.toString('utf8');
+	ok('iframeRewrite on rewrites same-origin iframe in HTML', enabledHtml.includes('<iframe src="/sub">'), enabledHtml);
+	const bpEnabled = JSON.parse(decodeURIComponent(irp._shimSrc(TARGET).split('?bp=')[1]));
+	eq('_shimSrc includes iframeRewrite:true when enabled', bpEnabled.iframeRewrite, true);
+
+	// Shipped SHIM_JS assertions
+	for (const token of ['MutationObserver', 'attributeFilter:["src"]', 'HTMLIFrameElement', 'HTMLFrameElement']) {
+		ok('SHIM_JS includes ' + token, SHIM_JS.includes(token));
+	}
+
+	// Execute SHIM_JS with iframeRewrite=true & empty prefix to test P2/P3/P4
+	const posted = [];
+	const listeners = {};
+	function Document() {}
+	Document.prototype.execCommand = () => false;
+	function HTMLIFrameElement() {}
+	let rawSrc = '';
+	Object.defineProperty(HTMLIFrameElement.prototype, 'src', {
+		configurable: true,
+		enumerable: true,
+		get() { return rawSrc; },
+		set(v) { rawSrc = v; },
+	});
+	const doc = new Document();
+	doc.currentScript = {
+		src: 'http://127.0.0.1:4599/p/' + TOKEN + '/__bp_shim.js?bp=' +
+			encodeURIComponent(JSON.stringify({ origin: 'https://site.test', prefix: '', iframeRewrite: true })),
+	};
+	doc.addEventListener = () => {};
+	doc.querySelectorAll = () => [];
+	doc.documentElement = {};
+
+	const ctx = {
+		URL,
+		Document,
+		HTMLIFrameElement,
+		document: doc,
+		location: { href: 'http://127.0.0.1:4599/', origin: 'http://127.0.0.1:4599', pathname: '/', search: '', hash: '' },
+		history: { pushState() {}, replaceState() {} },
+		parent: { postMessage(m) { posted.push(m); } },
+		navigator: {},
+		addEventListener: (ev, fn) => { listeners[ev] = listeners[ev] || []; listeners[ev].push(fn); },
+		setTimeout,
+	};
+	ctx.window = ctx;
+	vm.createContext(ctx);
+	vm.runInContext(SHIM_JS, ctx);
+	const vmWindow = vm.runInContext('window', ctx);
+
+	// P2: HTMLIFrameElement.prototype.src setter rewrites same-origin URL synchronously
+	const frameEl = new HTMLIFrameElement();
+	frameEl.src = 'https://site.test/embed?a=1';
+	eq('SHIM_JS HTMLIFrameElement.src setter rewrites same-origin to root-relative', rawSrc, '/embed?a=1');
+	frameEl.src = 'https://other.test/embed';
+	eq('SHIM_JS HTMLIFrameElement.src setter leaves cross-origin alone', rawSrc, 'https://other.test/embed');
+
+	// P3: relay openExternal & copy, NEVER relay pageNavigated
+	posted.length = 0;
+	const childWin = {};
+	for (const fn of listeners.message || []) {
+		fn({ source: childWin, data: { type: 'openExternal', url: 'https://ext.test/' } });
+		fn({ source: childWin, data: { type: 'copy', text: 'from-child' } });
+		fn({ source: childWin, data: { type: 'pageNavigated', url: 'https://site.test/child' } });
+		fn({ source: vmWindow, data: { type: 'openExternal', url: 'https://self-loop.test/' } });
+	}
+	ok('SHIM_JS relays child openExternal', posted.some((m) => m.type === 'openExternal' && m.url === 'https://ext.test/'), posted);
+	ok('SHIM_JS relays child copy', posted.some((m) => m.type === 'copy' && m.text === 'from-child'), posted);
+	eq('SHIM_JS never relays child pageNavigated', posted.some((m) => m.type === 'pageNavigated'), false);
+	eq('SHIM_JS ignores message from self', posted.some((m) => m.url === 'https://self-loop.test/'), false);
+}
+
+// ---------------------------------------------------------------------------
 try {
 	fs.unlinkSync(BUNDLE);
 	fs.unlinkSync(JAR_BUNDLE);

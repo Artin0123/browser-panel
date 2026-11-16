@@ -6,6 +6,7 @@ export interface BrowserConfig {
 	historyLimit: number;
 	proxyEnabled: boolean;
 	proxyCookieJar: boolean;
+	proxyIframeRewrite: boolean;
 	acceptSelfSignedCerts: boolean;
 }
 
@@ -25,6 +26,7 @@ export function getConfig(): BrowserConfig {
 				: 200,
 		proxyEnabled: cfg.get<boolean>('proxyEnabled', false),
 		proxyCookieJar: cfg.get<boolean>('proxyCookieJar', false),
+		proxyIframeRewrite: cfg.get<boolean>('proxyIframeRewrite', false),
 		acceptSelfSignedCerts: cfg.get<boolean>('acceptSelfSignedCerts', true),
 	};
 }

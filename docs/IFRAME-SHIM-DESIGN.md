@@ -1,7 +1,6 @@
-# 子 iframe 的 shim 涵蓋 — 設計草案（提案，未實作）
+# 子 iframe 的 shim 涵蓋 — 設計草案
 
-狀態：**草案，有條件實作（2026-11-16 覆核）**。接線點已逐一對照 `src/proxy.ts`
-與 `app.js`，皆與現況相符。
+狀態：**已實作（2026-11-17，opt-in，`browser.proxyIframeRewrite` 預設 off）**。接線點已逐一對照 `src/proxy.ts` 與 `app.js`，皆與現況相符。
 
 本文解決 `docs/ISSUES.md` 2026-10-29「問題二」與 2026-11-13 覆核
 後仍存在的一層缺口：proxy 模式下，**頁面自己內嵌的子 iframe**（如
