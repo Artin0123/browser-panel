@@ -191,22 +191,34 @@ eq('_parseTarget rejects a non-http scheme', p._parseTarget('/p/' + TOKEN + '/ft
 eq('_parseTarget rejects a truncated prefix', p._parseTarget('/p/' + TOKEN + '/https'), null);
 
 // ---------------------------------------------------------------------------
-// Root-relative resolution — the open-proxy / SSRF gate.
+// Per-target Host resolution — the open-proxy / SSRF gate.
 // ---------------------------------------------------------------------------
 {
 	const fresh = makeProxy();
-	eq('_resolveTarget has no target before any navigation', fresh._resolveTarget('/x'), null);
+	eq('_resolveTarget has no target before any registration', fresh._resolveTarget({ url: '/x', headers: {} }), null);
+	eq('_resolveTarget rejects unregistered t-<id>.localhost',
+		fresh._resolveTarget({ url: '/x', headers: { host: 't-0123456789ab.localhost:4599' } }), null);
 }
 {
 	const fresh = makeProxy();
+	const fakeReq = (url, host) => ({ url, headers: host ? { host } : {} });
 	eq('_resolveTarget accepts the explicit target form',
-		fresh._resolveTarget('/p/' + fresh._token + '/https/site.test/x').url.href, 'https://site.test/x');
-	eq('_resolveTarget resolves a root-relative path against the last target',
-		fresh._resolveTarget('/y/z?k=2').url.href, 'https://site.test/y/z?k=2');
-	eq('_resolveTarget rejects protocol-relative //host', fresh._resolveTarget('//evil.test/x'), null);
-	eq('_resolveTarget rejects absolute-form http://host', fresh._resolveTarget('http://evil.test/x'), null);
-	eq('_resolveTarget rejects backslash tricks', fresh._resolveTarget('/a\\b'), null);
-	eq('_resolveTarget rejects another token', fresh._resolveTarget('/p/othertok/https/evil.test/x'), null);
+		fresh._resolveTarget(fakeReq('/p/' + fresh._token + '/https/site.test/x')).url.href, 'https://site.test/x');
+	const siteHost = fresh._registerTarget(new URL('https://site.test')).proxyOrigin.slice('http://'.length);
+	const otherHost = fresh._registerTarget(new URL('https://other.test')).proxyOrigin.slice('http://'.length);
+	ok('two different origins get distinct t-<id>.localhost hosts', siteHost !== otherHost, [siteHost, otherHost]);
+	eq('_isAllowedHost accepts registered t-<id>.localhost', fresh._isAllowedHost(siteHost), true);
+	eq('_isAllowedHost rejects unregistered t-<id>.localhost', fresh._isAllowedHost('t-ffffffffffff.localhost:4599'), false);
+	eq('_resolveTarget resolves root-relative path against Host target',
+		fresh._resolveTarget(fakeReq('/y/z?k=2', siteHost)).url.href, 'https://site.test/y/z?k=2');
+	eq('_resolveTarget isolates second target simultaneously',
+		fresh._resolveTarget(fakeReq('/only-other', otherHost)).url.href, 'https://other.test/only-other');
+	eq('_resolveTarget still resolves first target after second was registered',
+		fresh._resolveTarget(fakeReq('/still-site', siteHost)).url.href, 'https://site.test/still-site');
+	eq('_resolveTarget rejects protocol-relative //host', fresh._resolveTarget(fakeReq('//evil.test/x', siteHost)), null);
+	eq('_resolveTarget rejects absolute-form http://host', fresh._resolveTarget(fakeReq('http://evil.test/x', siteHost)), null);
+	eq('_resolveTarget rejects backslash tricks', fresh._resolveTarget(fakeReq('/a\\b', siteHost)), null);
+	eq('_resolveTarget rejects another token', fresh._resolveTarget(fakeReq('/p/othertok/https/evil.test/x', siteHost)), null);
 }
 
 // ---------------------------------------------------------------------------
@@ -414,8 +426,8 @@ eq('_stripCrossOrigin is a no-op without the attribute',
 	}), TARGET);
 	eq('_copyResponseHeaders strips X-Frame-Options', 'x-frame-options' in out, false);
 	eq('_copyResponseHeaders drops Set-Cookie (proxy never persists logins)', 'set-cookie' in out, false);
-	eq('_copyResponseHeaders forces no-store', out['cache-control'], 'no-store');
-	eq('_copyResponseHeaders drops stale validators', ['expires' in out, 'pragma' in out], [false, false]);
+	eq('_copyResponseHeaders preserves upstream cache-control (per-target origin)', out['cache-control'], 'max-age=60');
+	eq('_copyResponseHeaders preserves validators', ['expires' in out, 'pragma' in out], [true, true]);
 	eq('_copyResponseHeaders drops hop-by-hop transfer-encoding', 'transfer-encoding' in out, false);
 	eq('_copyResponseHeaders keeps the body headers', out['content-type'], 'text/html');
 	eq('_copyResponseHeaders strips frame-ancestors only', out['content-security-policy'], "script-src 'self'");
@@ -425,9 +437,9 @@ eq('_copyResponseHeaders keeps a same-origin redirect root-relative',
 	'/new?x=1#frag');
 eq('_copyResponseHeaders keeps a relative redirect relative',
 	p._copyResponseHeaders(fakeRes(302, { location: '/rel' }), TARGET).location, '/rel');
-eq('_copyResponseHeaders routes a cross-origin redirect through the proxy',
+eq('_copyResponseHeaders routes a cross-origin redirect to its per-target origin',
 	p._copyResponseHeaders(fakeRes(302, { location: 'https://other.test/y?z' }), TARGET).location,
-	BASE + 'https/other.test/y?z');
+	p._registerTarget(new URL('https://other.test')).proxyOrigin + '/y?z');
 eq('_copyResponseHeaders drops an unparseable Location',
 	p._copyResponseHeaders(fakeRes(302, { location: 'http://[::1' }), TARGET).location, undefined);
 eq('_copyResponseHeaders leaves a Location-less redirect alone',
@@ -576,9 +588,9 @@ eq('pathMatch /foo vs /foo is true', pathMatch('/foo', '/foo'), true);
 	eq('_rewriteIframeSrcs rewrites same-origin unquoted src',
 		irp._rewriteIframeSrcs('<iframe src=https://site.test/c></iframe>', TARGET),
 		'<iframe src="/c"></iframe>');
-	eq('_rewriteIframeSrcs leaves cross-origin iframe alone',
+	eq('_rewriteIframeSrcs rewrites cross-origin iframe to per-target origin',
 		irp._rewriteIframeSrcs('<iframe src="https://accounts.google.com/o/oauth2"></iframe>', TARGET),
-		'<iframe src="https://accounts.google.com/o/oauth2"></iframe>');
+		`<iframe src="${irp._registerTarget(new URL('https://accounts.google.com')).proxyOrigin}/o/oauth2"></iframe>`);
 	eq('_rewriteIframeSrcs leaves /p/ prefix, root-relative, srcdoc, about:blank, javascript:, data-src alone',
 		irp._rewriteIframeSrcs(
 			`<iframe src="/p/${IR_TOK}/https/site.test/x"></iframe>` +
@@ -630,7 +642,7 @@ eq('pathMatch /foo vs /foo is true', pathMatch('/foo', '/foo'), true);
 	const doc = new Document();
 	doc.currentScript = {
 		src: 'http://127.0.0.1:4599/p/' + TOKEN + '/__bp_shim.js?bp=' +
-			encodeURIComponent(JSON.stringify({ origin: 'https://site.test', prefix: '', iframeRewrite: true })),
+			encodeURIComponent(JSON.stringify({ origin: 'https://site.test', prefix: '/p/' + TOKEN + '/', iframeRewrite: true })),
 	};
 	doc.addEventListener = () => {};
 	doc.querySelectorAll = () => [];
@@ -658,7 +670,8 @@ eq('pathMatch /foo vs /foo is true', pathMatch('/foo', '/foo'), true);
 	frameEl.src = 'https://site.test/embed?a=1';
 	eq('SHIM_JS HTMLIFrameElement.src setter rewrites same-origin to root-relative', rawSrc, '/embed?a=1');
 	frameEl.src = 'https://other.test/embed';
-	eq('SHIM_JS HTMLIFrameElement.src setter leaves cross-origin alone', rawSrc, 'https://other.test/embed');
+	eq('SHIM_JS HTMLIFrameElement.src setter rewrites cross-origin via prefix',
+		rawSrc, 'http://127.0.0.1:4599/p/' + TOKEN + '/https/other.test/embed');
 
 	// P3: relay openExternal & copy, NEVER relay pageNavigated
 	posted.length = 0;

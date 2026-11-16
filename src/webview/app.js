@@ -1060,7 +1060,12 @@ import { svgIcon } from './icons.js';
 					u = fromProxyUrl(u);
 				} else if (proxy.baseUrl) {
 					try {
-						if (new URL(u).origin === new URL(proxy.baseUrl).origin) {
+						const reported = new URL(u);
+						const base = new URL(proxy.baseUrl);
+						if (
+							reported.origin === base.origin ||
+							(reported.port === base.port && /^t-[0-9a-f]{12}\.localhost$/i.test(reported.hostname))
+						) {
 							return;
 						}
 					} catch {

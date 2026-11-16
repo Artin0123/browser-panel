@@ -1,15 +1,17 @@
 # Changelog
 
-## [Unreleased]
-
-### Added
-
-- Proxy: opt-in extension-host cookie jar (`browser.proxyCookieJar`, default `false`) that holds upstream `Set-Cookie` sessions per target origin in OS-encrypted `SecretStorage` without exposing cookies to the browser, plus the **Browser: Clear Proxied Logins** (`browser.clearProxiedLogins`) command. Intended for trusted/self-hosted dev servers (not recommended when browsing untrusted sites through the proxy).
-- Proxy: opt-in same-origin child `<iframe>` rewriting (`browser.proxyIframeRewrite`, default `false`) so nested frames receive the shim and relay `window.open` / `target=_blank` / clipboard writes upward without polluting URL tracking (`pageNavigated` is not relayed).
+## [0.5.0] - 2026-11-17
 
 ### Changed
 
+- Proxy: **per-target origin isolation (`http://t-<12hex>.localhost:<port>`)** replaces the single shared `127.0.0.1:<port>` origin and `_lastTarget` state. Each upstream origin maps deterministically to its own loopback subdomain, removing global `cache-control: no-store` overrides (upstream browser caching works normally), eliminating cross-target `_lastTarget` races, and isolating `CookieJar` / storage per target.
+- Proxy: **`browser.proxyCookieJar` and `browser.proxyIframeRewrite` now default to `true`** (when `browser.proxyEnabled` is on), and child `<iframe>` rewriting covers both same-origin and cross-origin `http(s)://` sub-frames.
 - Extension host: **last URL, history and closed state are now shared across workspaces** (`globalState` instead of `workspaceState`); Clear storage clears that single shared state. Existing per-workspace entries are not migrated (history and last URL start fresh on upgrade), and a workspace-scoped `browser.defaultUrl` now mainly acts as the **Home** button target once a global last URL is recorded.
+
+### Added
+
+- Proxy: extension-host cookie jar (`browser.proxyCookieJar`, default `true`) that holds upstream `Set-Cookie` sessions per target origin in OS-encrypted `SecretStorage` without exposing cookies to the browser, plus the **Browser: Clear Proxied Logins** (`browser.clearProxiedLogins`) command.
+- Proxy: child `<iframe>` rewriting (`browser.proxyIframeRewrite`, default `true`) so nested same-origin and cross-origin frames receive the shim and relay `window.open` / `target=_blank` / clipboard writes upward without polluting URL tracking (`pageNavigated` is not relayed).
 
 ## [0.4.5] - 2026-11-13
 

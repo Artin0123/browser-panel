@@ -1,3 +1,4 @@
+import * as crypto from 'crypto';
 import * as http from 'http';
 import * as https from 'https';
 import * as zlib from 'zlib';
@@ -224,11 +225,12 @@ export const SHIM_JS =
 	'return sa.apply(this,arguments)' +
 	'};' +
 	'}catch(e){}' +
-	// Opt-in child iframe coverage (browser.proxyIframeRewrite): rewrite
-	// same-origin child iframe src to root-relative so they load through the
-	// proxy and receive this shim, then relay openExternal/copy upward (never
-	// pageNavigated, so child frames cannot pollute the URL bar/history).
-	'if(bp.iframeRewrite&&bp.origin){' +
+	// Opt-in child iframe coverage (browser.proxyIframeRewrite): rewrite child
+	// iframe src so nested frames (both same-origin and cross-origin) load
+	// through their per-target proxy origin and receive this shim, then relay
+	// openExternal/copy upward (never pageNavigated, so child frames cannot
+	// pollute the URL bar/history).
+	'if(bp.iframeRewrite){' +
 	'var rewriteIfSrc=function(u){' +
 	'if(!u||typeof u!=="string")return null;' +
 	'var s=u.trim();' +
@@ -236,7 +238,11 @@ export const SHIM_JS =
 	'if(bp.prefix&&s.lastIndexOf(bp.prefix,0)===0)return null;' +
 	'if(/^(about|javascript|data|blob|mailto|tel):/i.test(s))return null;' +
 	'try{var x=new URL(s,document.baseURI||location.href);' +
-	'if((x.protocol==="http:"||x.protocol==="https:")&&x.origin===bp.origin){return x.pathname+x.search+x.hash}' +
+	'if(x.origin===location.origin||(x.port===location.port&&/^t-[0-9a-f]{12}\\.localhost$/i.test(x.hostname)))return null;' +
+	'if(x.protocol==="http:"||x.protocol==="https:"){' +
+	'if(bp.origin&&x.origin===bp.origin){return x.pathname+x.search+x.hash}' +
+	'if(bp.prefix){return location.origin+bp.prefix+x.protocol.slice(0,-1)+"/"+x.host+x.pathname+x.search+x.hash}' +
+	'}' +
 	'}catch(e){}return null' +
 	'};' +
 	'var sweepIframe=function(el){' +
@@ -310,7 +316,7 @@ export class FrameProxy {
 	private _server: http.Server | undefined;
 	private _port = 0;
 	private readonly _token = Math.random().toString(36).slice(2) + Date.now().toString(36);
-	private _lastTarget: ProxyTarget | null = null;
+	private readonly _targets = new Map<string, URL>();
 	// Upgraded (WebSocket) sockets; closeAllConnections doesn't cover them.
 	private readonly _upgradeSockets = new Set<import('stream').Duplex>();
 
@@ -392,7 +398,7 @@ export class FrameProxy {
 		return new Promise((resolve) => {
 			const server = this._server;
 			this._server = undefined;
-			this._lastTarget = null;
+			this._targets.clear();
 			if (!server) {
 				resolve();
 				return;
@@ -445,18 +451,40 @@ export class FrameProxy {
 		return { url };
 	}
 
-	/** Resolve a request URL to a target: /p/<token>/... or a root-relative path against the last target. */
-	private _resolveTarget(reqUrl: string): ProxyTarget | null {
+	private _registerTarget(targetUrl: URL): { id: string; proxyOrigin: string } {
+		const origin = targetUrl.protocol + '//' + targetUrl.host;
+		const id = 't-' + crypto.createHash('sha256').update(origin).digest('hex').slice(0, 12);
+		if (!this._targets.has(id)) {
+			this._targets.set(id, new URL(origin));
+		}
+		return { id, proxyOrigin: `http://${id}.localhost:${this._port}` };
+	}
+
+	private _hostTargetId(host: unknown): string | null {
+		if (typeof host !== 'string') {
+			return null;
+		}
+		const suffix = '.localhost:' + this._port;
+		if (!host.endsWith(suffix)) {
+			return null;
+		}
+		const id = host.slice(0, -suffix.length);
+		return /^t-[0-9a-f]{12}$/.test(id) ? id : null;
+	}
+
+	/** Resolve a request to a target: /p/<token>/... or a root-relative path against the Host's registered origin. */
+	private _resolveTarget(req: http.IncomingMessage): ProxyTarget | null {
+		const reqUrl = req.url || '';
 		const parsed = this._parseTarget(reqUrl);
 		if (parsed) {
-			this._lastTarget = parsed;
+			this._registerTarget(parsed.url);
 			return parsed;
 		}
-		// Root-relative request from the currently proxied page (e.g. /_next/static/... or CSS
-		// url(/x)): those resolve against the origin root and bypass <base>. Anything under
-		// /p/ with a wrong token stays null (404).
-		const last = this._lastTarget;
-		if (!last || !reqUrl || reqUrl.startsWith('/p/')) {
+		// Root-relative request from a per-target *.localhost:<port> origin.
+		// Anything under /p/ with a wrong token stays null (404).
+		const id = this._hostTargetId(req.headers.host);
+		const baseOrigin = id ? this._targets.get(id) : undefined;
+		if (!baseOrigin || !reqUrl || reqUrl.startsWith('/p/')) {
 			return null;
 		}
 		// Reject forms that would let the request pick its own origin (open proxy / SSRF):
@@ -465,9 +493,9 @@ export class FrameProxy {
 			return null;
 		}
 		try {
-			// Explicit origin concatenation (not new URL(reqUrl, last.url)): the request
+			// Explicit origin concatenation (not new URL(reqUrl, baseOrigin)): the request
 			// path must never be able to change the target origin.
-			const url = new URL(last.url.origin + reqUrl);
+			const url = new URL(baseOrigin.origin + reqUrl);
 			return { url };
 		} catch {
 			return null;
@@ -602,7 +630,11 @@ export class FrameProxy {
 	 * loopback address (the webview always uses the baseUrl form).
 	 */
 	private _isAllowedHost(host: unknown): boolean {
-		return host === '127.0.0.1:' + this._port || host === 'localhost:' + this._port;
+		if (host === '127.0.0.1:' + this._port || host === 'localhost:' + this._port) {
+			return true;
+		}
+		const id = this._hostTargetId(host);
+		return id !== null && this._targets.has(id);
 	}
 
 	private _handleUpgrade(
@@ -614,7 +646,7 @@ export class FrameProxy {
 			socket.destroy();
 			return;
 		}
-		const target = this._resolveTarget(req.url || '');
+		const target = this._resolveTarget(req);
 		if (!target) {
 			socket.destroy();
 			return;
@@ -733,23 +765,8 @@ export class FrameProxy {
 			FrameProxy._setCspHeader(outHeaders, cspPolicies);
 		}
 
-		// The proxy origin is SHARED across every site served through it: a
-		// root-relative URL (`/`, `/login`, …) means a different target at
-		// different times (whichever site was parsed last). Any cacheable
-		// upstream response would therefore be stored by the browser under that
-		// shared URL and later served for a DIFFERENT site's navigation —
-		// observed in the field: a site's `GET / → 301 https://same-host-upgrade`
-		// (cross-origin by scheme) is rewritten to the prefixed form, its bounce
-		// lands back on `/`, and the cached 301 then hijacks every later
-		// navigation that bounces through `/` — Home/Back to another site looped
-		// on the first site's proxy URL with a white screen. Redirects are the
-		// sharpest edge (their Location outlives their target), but a cacheable
-		// body poisons the same way, so responses are marked uncacheable
-		// wholesale: a local dev proxy gains nothing from browser caching.
-		outHeaders['cache-control'] = 'no-store';
-		delete outHeaders.expires;
-		delete outHeaders.pragma;
-
+		// Each target origin maps 1-to-1 to its own t-<hash>.localhost:<port>, so
+		// upstream Cache-Control / Expires / Pragma headers stay isolated per site.
 		const status = pres.statusCode ?? 502;
 		if (status >= 300 && status < 400 && outHeaders.location) {
 			try {
@@ -761,14 +778,11 @@ export class FrameProxy {
 					// Location carries none.
 					outHeaders.location = (locUrl.pathname || '/') + locUrl.search + (locUrl.hash || '');
 				} else {
-					// Cross-origin redirect: route through the explicit-target form;
-					// the document bounce in _handle then lands it at the new origin's
-					// own root-relative path, so pathname-routing SPAs survive there too.
+					// Cross-origin redirect: pre-register the new target origin and land
+					// directly on its own t-<id>.localhost:<port> origin.
+					const { proxyOrigin } = this._registerTarget(locUrl);
 					outHeaders.location =
-						this.baseUrl +
-						locUrl.protocol.slice(0, -1) +
-						'/' +
-						locUrl.host +
+						proxyOrigin +
 						(locUrl.pathname || '/') +
 						(locUrl.search || '') +
 						(locUrl.hash || '');
@@ -923,11 +937,10 @@ export class FrameProxy {
 	}
 
 	/**
-	 * Opt-in child iframe rewrite (browser.proxyIframeRewrite): rewrite same-origin
-	 * absolute <iframe src> values to root-relative paths so nested frames also
-	 * load through the proxy (and receive the shim) instead of bypassing it.
-	 * Cross-origin iframes, /p/ prefix URLs, root-relative paths, srcdoc, and
-	 * non-http(s) schemes are left untouched.
+	 * Opt-in child iframe rewrite (browser.proxyIframeRewrite): rewrite child
+	 * <iframe src> values (same-origin to root-relative, cross-origin http(s) to
+	 * their own pre-registered t-<id>.localhost:<port> origin) so nested frames
+	 * also load through the proxy and receive the shim.
 	 */
 	private _rewriteIframeSrcs(html: string, target: ProxyTarget): string {
 		if (!/<iframe\b/i.test(html)) {
@@ -946,8 +959,11 @@ export class FrameProxy {
 				}
 				try {
 					const u = new URL(raw, target.url);
-					if ((u.protocol === 'http:' || u.protocol === 'https:') && u.origin === targetOrigin) {
-						const rewritten = u.pathname + u.search + u.hash;
+					if (u.protocol === 'http:' || u.protocol === 'https:') {
+						const rewritten =
+							u.origin === targetOrigin
+								? u.pathname + u.search + u.hash
+								: this._registerTarget(u).proxyOrigin + u.pathname + u.search + u.hash;
 						const quote = dq !== undefined ? '"' : sq !== undefined ? "'" : '"';
 						return attrPrefix + quote + rewritten + quote;
 					}
@@ -1154,34 +1170,23 @@ export class FrameProxy {
 			return;
 		}
 
-		const target = this._resolveTarget(reqUrl);
+		const target = this._resolveTarget(req);
 		if (!target) {
 			res.writeHead(404);
 			res.end('Not Found');
 			return;
 		}
 
-		// Root-relative bounce (see file header): a /p/<token>/... GET/HEAD request
-		// is answered with a redirect to the target's own path, so the iframe ends
-		// up at location.pathname == target path and pathname-routing SPAs work.
-		// NO sec-fetch-dest gate: VS Code's webview iframes send the document
-		// navigation with dest=empty (observed via request logging), so a
-		// dest-based gate silently never fired. The prefixed form is only ever
-		// produced by the webview's iframe.src bootstrap and by our own
-		// cross-origin redirect rewrites — both are navigations we want bounced —
-		// so every prefixed GET/HEAD gets the bounce. (The shim path above is
-		// matched first; root-relative requests never enter this branch
-		// (_parseTarget is null), so it cannot loop.)
-		// Diagnostic log kept commented — uncomment to trace requests in the
-		// Extension Development Host's Debug Console.
-		// console.log('[proxy]', req.method, reqUrl.slice(0, 120), 'dest=' + (dest || '(none)'));
+		// Per-target origin bounce: a /p/<token>/... GET/HEAD request is answered
+		// with a 302 redirect to the target's deterministic t-<id>.localhost:<port>
+		// origin, so each site gets its own isolated origin and pathname-routing SPAs work.
 		if (
 			(req.method === 'GET' || req.method === 'HEAD') &&
 			this._parseTarget(reqUrl) !== null
 		) {
-			// console.log('[proxy] bounce ->', target.url.pathname + target.url.search);
+			const { proxyOrigin } = this._registerTarget(target.url);
 			res.writeHead(302, {
-				location: target.url.pathname + target.url.search + target.url.hash,
+				location: proxyOrigin + target.url.pathname + target.url.search + target.url.hash,
 				'cache-control': 'no-store',
 			});
 			res.end();
