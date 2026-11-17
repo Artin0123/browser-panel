@@ -82,7 +82,7 @@ body {
 	height: 28px;
 	padding: 0 32px 0 8px;
 	font-family: inherit;
-	font-size: inherit;
+	font-size: calc(var(--vscode-font-size, 13px) + 1px);
 	background-color: var(--vscode-input-background);
 	color: var(--vscode-input-foreground);
 	border: 1px solid var(--vscode-input-border, transparent);
