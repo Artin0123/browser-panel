@@ -448,7 +448,6 @@ body {
 }
 
 .error-reconnect {
-	font-size: 12px;
 	line-height: 1.4;
 	min-height: 1.4em;
 	color: var(--vscode-descriptionForeground);
