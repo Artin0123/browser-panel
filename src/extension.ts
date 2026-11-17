@@ -37,17 +37,11 @@ export function activate(context: vscode.ExtensionContext): void {
 		.catch(() => {});
 
 	// Local proxy that strips frame-blocking headers (lazy: only runs while enabled).
-	// Cert acceptance and cookie jar opt-in are read per request so settings apply without a restart.
 	// The bound port is remembered in globalState and re-used on the next start so
 	// the proxy origin (and the embedded pages' localStorage — e.g. opencode's
 	// pairing token) stays stable across editor restarts; a taken port falls back
 	// to a random one (second VS Code window, port grabbed meanwhile).
-	const proxy = new FrameProxy(
-		() => getConfig().acceptSelfSignedCerts,
-		cookieJar,
-		() => getConfig().proxyCookieJar,
-		() => getConfig().proxyIframeRewrite
-	);
+	const proxy = new FrameProxy(cookieJar);
 	const PROXY_PORT_KEY = 'browser.proxyPort';
 	context.subscriptions.push({
 		dispose: () => {

@@ -109,9 +109,9 @@ CDN 只對站台的真實 origin 發 `Access-Control-Allow-Origin`。頁面若�
 
 補上瀏覽器端 cookie 轉發只對靠伺服器端 session 的普通站台有用（Django、Rails、PHP 那種），對第 3 層的硬否決照樣無效，而共用 origin 會帶進一批新邊界：domain 衝突、`HttpOnly` 失去意義、兩個站台互相看到對方的 cookie。因此**瀏覽器端轉發維持不做**。
 
-**代理端 cookie jar（`browser.proxyCookieJar`，v0.5.0 起預設開啟）**：可維持伺服器端 session cookie（如自架工具 `dsh web`、Django/Rails/PHP 等開發伺服器）。`Set-Cookie` 仍不轉發給瀏覽器，而是由擴充宿主在 `CookieJar` 中按目標 origin 自持並存入作業系統加密的 `SecretStorage`（跨 VS Code 重啟存活），出站請求再由代理組裝 `Cookie` 標頭；可用指令 **Clear Proxied Logins**（`browser.clearProxiedLogins`）清除，或在設定中關閉。在 Per-Target Origin 架構下，各站台皆有獨立的 `t-<12hex>.localhost:<port>`，不再有共用 Origin 跨站互讀 cookie jar 的問題。
+**代理端 cookie jar（v0.5.0 起內建於代理模式）**：可維持伺服器端 session cookie（如自架工具 `dsh web`、Django/Rails/PHP 等開發伺服器）。`Set-Cookie` 仍不轉發給瀏覽器，而是由擴充宿主在 `CookieJar` 中按目標 origin 自持並存入作業系統加密的 `SecretStorage`（跨 VS Code 重啟存活），出站請求再由代理組裝 `Cookie` 標頭；可用指令 **Clear Proxied Logins**（`browser.clearProxiedLogins`）清除。在 Per-Target Origin 架構下，各站台皆有獨立的 `t-<12hex>.localhost:<port>`，不再有共用 Origin 跨站互讀 cookie jar 的問題。
 
-未開啟 `browser.proxyCookieJar` 時，登入能成立的情況只有一種：關掉代理，且站台本身允許被內嵌。cookie 存在 webview 的 Electron session 裡，跨 hide／show、Close／Reopen、編輯器重啟都在，只有「Developer: Clear Webview Storage」或站台自己的過期會清掉。需要外部身分的流程一律用選單的 **Open in external browser**。
+關閉 `browser.proxyEnabled` 時（直連模式），登入能成立的情況只有一種：站台本身允許被內嵌。cookie 存在 webview 的 Electron session 裡，跨 hide／show、Close／Reopen、編輯器重啟都在，只有「Developer: Clear Webview Storage」或站台自己的過期會清掉。需要外部身分的流程一律用選單的 **Open in external browser**。
 
 ## 外部開啟的 URL 要原樣送出
 
@@ -124,9 +124,9 @@ CDN 只對站台的真實 origin 發 `Access-Control-Allow-Origin`。頁面若�
 
 轉送因此一律先送字串，宿主拒收才退回 `Uri.parse(...)`。把 `%3F` 還原成 `?` 的補償寫法不可行：那會改動 URL 本體，遇到位元組完全一致的簽名式網址就會壞。
 
-## 子框架涵蓋（`browser.proxyIframeRewrite`，v0.5.0 起預設開啟）
+## 子框架涵蓋（v0.5.0 起內建於代理模式）
 
-代理模式下，頁面自己內嵌的子 `<iframe>`（無論同站或跨站 `http(s)://`）若以真實 origin 載入，會繞過 proxy 而沒有 shim，裡面的 `window.open`／`target=_blank` 會撞上外層 webview 沙箱（無 `allow-popups`）被擋。`browser.proxyIframeRewrite`（需同時開啟 `browser.proxyEnabled`）開啟後：
+代理模式下，頁面自己內嵌的子 `<iframe>`（無論同站或跨站 `http(s)://`）若以真實 origin 載入，會繞過 proxy 而沒有 shim，裡面的 `window.open`／`target=_blank` 會撞上外層 webview 沙箱（無 `allow-popups`）被擋。開啟 `browser.proxyEnabled` 後即自動啟用：
 
 1. **HTML 與動態 DOM 改寫**：代理端（`_rewriteIframeSrcs`）與 shim（sweep、`MutationObserver`、`HTMLIFrameElement`/`HTMLFrameElement` 的 `src` setter patch）會將同站子 iframe 改寫為根相對路徑、將跨站 `http(s)://` 子 iframe 改寫為各自獨立的 `t-<child>.localhost:<port>`（動態建立經 `/p/<token>/…` 302 落地），使每層子框架都能經過 proxy 並取得 shim。
 2. **多層上拋（不污染網址列）**：每層 shim 安裝 `message` relay listener，將子框架的 `openExternal` 與 `copy` 逐級上拋至頂層；明確不轉發 `pageNavigated`，避免子框架導航污染網址列與前進／後退堆疊。

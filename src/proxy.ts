@@ -320,17 +320,7 @@ export class FrameProxy {
 	// Upgraded (WebSocket) sockets; closeAllConnections doesn't cover them.
 	private readonly _upgradeSockets = new Set<import('stream').Duplex>();
 
-	/**
-	 * Whether to accept self-signed certificates (browser.acceptSelfSignedCerts)
-	 * and optional extension-host CookieJar (browser.proxyCookieJar).
-	 * Both settings are read per request so changes apply without restarting.
-	 */
-	constructor(
-		private readonly _acceptSelfSigned: () => boolean,
-		private readonly _cookieJar?: CookieJar,
-		private readonly _cookieJarEnabled: () => boolean = () => Boolean(_cookieJar),
-		private readonly _iframeRewriteEnabled: () => boolean = () => false
-	) { }
+	constructor(private readonly _cookieJar?: CookieJar) { }
 
 	get baseUrl(): string {
 		return `http://127.0.0.1:${this._port}/p/${this._token}/`;
@@ -580,7 +570,7 @@ export class FrameProxy {
 		if (typeof nextUrl === 'string') {
 			headers['next-url'] = this._toTargetPath(nextUrl, target);
 		}
-		if (this._cookieJar && this._cookieJarEnabled()) {
+		if (this._cookieJar) {
 			const cookieHeader = this._cookieJar.send(target.url, target.url.protocol === 'https:');
 			if (cookieHeader) {
 				headers.cookie = cookieHeader;
@@ -654,18 +644,15 @@ export class FrameProxy {
 		this._upgradeSockets.add(socket);
 		socket.on('close', () => this._upgradeSockets.delete(socket));
 		const lib = target.url.protocol === 'https:' ? https : http;
-		// TLS validation is controlled by browser.acceptSelfSignedCerts (default on):
-		// local https dev servers are typically self-signed and must render through
-		// the proxy. The server binds to 127.0.0.1 behind a path token, and
-		// Set-Cookie is dropped, so cookies/credentials never flow through here.
-		const rejectUnauthorized = !this._acceptSelfSigned();
+		// Local https dev servers are typically self-signed and must render through
+		// the proxy. The server binds to 127.0.0.1 behind a path token.
 		const preq = lib.request({
 			hostname: target.url.hostname,
 			port: target.url.port || (target.url.protocol === 'https:' ? 443 : 80),
 			path: target.url.pathname + target.url.search,
 			method: req.method,
 			headers: this._outgoingHeaders(req, target, DROP_UPGRADE_HEADERS),
-			rejectUnauthorized,
+			rejectUnauthorized: false,
 		});
 		preq.on('upgrade', (res: http.IncomingMessage, upSocket: import('stream').Duplex, upHead: Buffer) => {
 			this._upgradeSockets.add(upSocket);
@@ -712,7 +699,7 @@ export class FrameProxy {
 	}
 
 	private _receiveCookies(res: http.IncomingMessage, target: ProxyTarget): void {
-		if (!this._cookieJar || !this._cookieJarEnabled()) {
+		if (!this._cookieJar) {
 			return;
 		}
 		const isHttps = target.url.protocol === 'https:';
@@ -928,10 +915,8 @@ export class FrameProxy {
 		const bp: Record<string, unknown> = {
 			origin: this._targetOrigin(target),
 			prefix: '/p/' + this._token + '/',
+			iframeRewrite: true,
 		};
-		if (this._iframeRewriteEnabled()) {
-			bp.iframeRewrite = true;
-		}
 		const raw = JSON.stringify(bp).replace(/</g, '\\u003c');
 		return this._shimPath + '?bp=' + encodeURIComponent(raw);
 	}
@@ -1013,9 +998,7 @@ export class FrameProxy {
 		const nonceAttr = nonce ? ' nonce="' + nonce + '"' : '';
 		const tag = '<script' + nonceAttr + ' src="' + this._shimSrc(target) + '"></script>';
 		let s = this._stripCrossOrigin(html.toString('utf8'));
-		if (this._iframeRewriteEnabled()) {
-			s = this._rewriteIframeSrcs(s, target);
-		}
+		s = this._rewriteIframeSrcs(s, target);
 		// <head> (not a prefix match — <header> would false-positive).
 		let m = /<head(\s[^>]*)?>/i.exec(s);
 		if (m) {
@@ -1195,7 +1178,6 @@ export class FrameProxy {
 
 		const lib = target.url.protocol === 'https:' ? https : http;
 		// Same TLS setting as _handleUpgrade — see the comment there.
-		const rejectUnauthorized = !this._acceptSelfSigned();
 		const preq = lib.request(
 			{
 				hostname: target.url.hostname,
@@ -1203,7 +1185,7 @@ export class FrameProxy {
 				path: target.url.pathname + target.url.search,
 				method: req.method || 'GET',
 				headers: this._outgoingHeaders(req, target),
-				rejectUnauthorized,
+				rejectUnauthorized: false,
 			},
 			(pres) => {
 				this._pipeOrInjectHtml(pres, res, target, req.method || 'GET');

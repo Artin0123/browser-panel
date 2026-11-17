@@ -67,32 +67,10 @@
           "default": true,
           "description": "%browser.retainContextWhenHidden.description%"
         },
-        "browser.historyLimit": {
-          "type": "number",
-          "default": 200,
-          "minimum": 1,
-          "maximum": 10000,
-          "description": "%browser.historyLimit.description%"
-        },
         "browser.proxyEnabled": {
           "type": "boolean",
           "default": false,
           "description": "%browser.proxyEnabled.description%"
-        },
-        "browser.proxyCookieJar": {
-          "type": "boolean",
-          "default": true,
-          "description": "%browser.proxyCookieJar.description%"
-        },
-        "browser.proxyIframeRewrite": {
-          "type": "boolean",
-          "default": true,
-          "description": "%browser.proxyIframeRewrite.description%"
-        },
-        "browser.acceptSelfSignedCerts": {
-          "type": "boolean",
-          "default": true,
-          "description": "%browser.acceptSelfSignedCerts.description%"
         }
       }
     }

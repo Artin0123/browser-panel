@@ -1,15 +1,11 @@
 {
-	"browser.open.title": "打开浏览器",
-	"browser.clearProxiedLogins.title": "清除代理登录状态",
+	"browser.open.title": "打开",
 	"browser.category": "浏览器",
+	"browser.clearProxiedLogins.title": "清除代理登录态",
 	"browser.container.title": "浏览器",
 	"browser.view.name": "浏览器",
-	"configuration.title": "浏览器面板",
+	"configuration.title": "浏览器",
 	"browser.defaultUrl.description": "浏览器默认打开的网址（主页目标）。修改端口请编辑此网址。",
 	"browser.retainContextWhenHidden.description": "视图隐藏时保持页面状态（滚动位置、表单、JS 状态、WebSocket）。重新加载后生效。",
-	"browser.historyLimit.description": "历史记录最多保留的条数（超出删除最旧）。",
-	"browser.proxyEnabled.description": "通过本地代理加载页面，去除 frame 封锁头（X-Frame-Options / CSP frame-ancestors）。可解决「仅禁止内嵌」的站点；需要真实浏览器会话的站点（登录、重度 JS——如 PayPal、Microsoft 登录页）仍会白屏——此类站点请用「在外部浏览器中打开」。",
-	"browser.proxyCookieJar.description": "在开启 proxyEnabled 时由扩展宿主按目标 origin 隔离代持上游 session cookie（存于操作系统加密的 SecretStorage，不进入浏览器）。",
-	"browser.proxyIframeRewrite.description": "在开启 proxyEnabled 时将子 <iframe>（含同站与跨站）改经代理加载，使嵌套框架内的弹出窗口与外部链接也能被拦截打开。若网站父子框架间依赖指定真实 origin 的 postMessage，可能会受影响。",
-	"browser.acceptSelfSignedCerts.description": "加载页面与可达性探测时接受自签名证书。本地 https 开发服务器请保持开启；关闭后所有请求都强制校验证书（自签名主机会显示为无法连接）。"
+	"browser.proxyEnabled.description": "通过本地代理（*.localhost）加载页面，自动去除 frame 封锁头（X-Frame-Options / CSP frame-ancestors）、改写嵌套子 iframe、按目标 origin 隔离代持 session cookie，并接受自签名本地证书。依赖真实浏览器 OAuth 或严格校验 https:// origin 的站点仍请使用「在外部浏览器中打开」。"
 }

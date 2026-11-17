@@ -197,7 +197,7 @@ export class BrowserViewProvider implements vscode.WebviewViewProvider {
 	}
 
 	private async _addHistory(url: string): Promise<void> {
-		const limit = Math.max(1, getConfig().historyLimit);
+		const limit = 200;
 		const history = this._getHistory();
 		let next: HistoryEntry[];
 		if (history.length > 0 && history[0].url === url) {
@@ -409,13 +409,11 @@ export class BrowserViewProvider implements vscode.WebviewViewProvider {
 			}
 			const lib = u.protocol === 'https:' ? https : http;
 			let timer: NodeJS.Timeout | undefined;
-			// Controlled by browser.acceptSelfSignedCerts (default on): the probe only
-			// checks reachability; self-signed certs (typical for local https dev) must
-			// not be misreported as unreachable. No credentials are sent (cookies
-			// don't exist here).
+			// Self-signed certs (typical for local https dev) must not be misreported
+			// as unreachable. No credentials are sent (cookies don't exist here).
 			const req = lib.get(
 				u,
-				{ headers: { 'user-agent': 'browser-panel' }, rejectUnauthorized: !getConfig().acceptSelfSignedCerts },
+				{ headers: { 'user-agent': 'browser-panel' }, rejectUnauthorized: false },
 				(res) => {
 					if (timer) {
 						clearTimeout(timer);

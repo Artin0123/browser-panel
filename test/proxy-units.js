@@ -76,7 +76,7 @@ function ok(name, cond, detail) {
 }
 
 function makeProxy() {
-	const p = new FrameProxy(() => false);
+	const p = new FrameProxy();
 	p._port = 4599; // baseUrl is only assembled from this; no server is started
 	return p;
 }
@@ -177,9 +177,10 @@ ok('SHIM_JS reads its own ?bp= mapping', SHIM_JS.includes('document.currentScrip
 ok('_shimSrc points at the shim path', p._shimSrc(TARGET).startsWith('/p/' + TOKEN + '/__bp_shim.js?bp='));
 {
 	const bp = JSON.parse(decodeURIComponent(p._shimSrc(TARGET).split('?bp=')[1]));
-	eq('_shimSrc ?bp= describes target origin + prefix', bp, {
+	eq('_shimSrc ?bp= describes target origin + prefix + iframeRewrite', bp, {
 		origin: 'https://site.test',
 		prefix: '/p/' + TOKEN + '/',
+		iframeRewrite: true,
 	});
 }
 eq('_parseTarget keeps path + query',
@@ -545,11 +546,10 @@ eq('pathMatch /foo vs /foo is true', pathMatch('/foo', '/foo'), true);
 	eq('merge load restores remaining persisted cookies', raced.size(), MAX_COOKIES_TOTAL);
 }
 
-// FrameProxy + CookieJar wiring (enabled vs disabled)
+// FrameProxy + CookieJar wiring
 {
 	const jar = new CookieJar();
-	let enabled = true;
-	const jp = new FrameProxy(() => false, jar, () => enabled);
+	const jp = new FrameProxy(jar);
 	const dshTarget = { url: new URL('http://127.0.0.1:3080/') };
 
 	// rawHeaders keeps Set-Cookie with comma in Expires intact
@@ -563,20 +563,14 @@ eq('pathMatch /foo vs /foo is true', pathMatch('/foo', '/foo'), true);
 
 	const outReq = jp._outgoingHeaders(fakeReq({ cookie: 'browser=untrusted' }), dshTarget);
 	eq('FrameProxy attaches jar cookies and ignores browser cookie', outReq.cookie, 'dsh-auth=v1; extra=2');
-
-	// Toggling off disables send/receive immediately
-	enabled = false;
-	const outDisabled = jp._outgoingHeaders(fakeReq({ cookie: 'browser=untrusted' }), dshTarget);
-	eq('FrameProxy with jar disabled drops cookies as before', 'cookie' in outDisabled, false);
 }
 
 // ---------------------------------------------------------------------------
-// Child iframe rewrite & shim relay (browser.proxyIframeRewrite).
+// Child iframe rewrite & shim relay (built-in in proxy mode).
 // ---------------------------------------------------------------------------
 {
-	const irp = new FrameProxy(() => false, undefined, () => false, () => true);
-	irp._port = 4599;
-	const IR_TOK = irp._token;
+	const irp = p;
+	const IR_TOK = TOKEN;
 
 	// _rewriteIframeSrcs cases
 	eq('_rewriteIframeSrcs rewrites same-origin double-quoted src',
@@ -613,13 +607,11 @@ eq('pathMatch /foo vs /foo is true', pathMatch('/foo', '/foo'), true);
 		irp._rewriteIframeSrcs('<iframe src="http://[::1"></iframe>', TARGET),
 		'<iframe src="http://[::1"></iframe>');
 
-	// Opt-in gating in _injectShimTag & _shimSrc
-	const disabledHtml = p._injectShimTag(Buffer.from('<head></head><iframe src="https://site.test/sub"></iframe>'), TARGET, undefined).html.toString('utf8');
-	ok('iframeRewrite off leaves same-origin iframe untouched', disabledHtml.includes('src="https://site.test/sub"'), disabledHtml);
+	// Child iframe rewrite is always enabled in _injectShimTag & _shimSrc
 	const enabledHtml = irp._injectShimTag(Buffer.from('<head></head><iframe src="https://site.test/sub"></iframe>'), TARGET, undefined).html.toString('utf8');
-	ok('iframeRewrite on rewrites same-origin iframe in HTML', enabledHtml.includes('<iframe src="/sub">'), enabledHtml);
+	ok('_injectShimTag rewrites same-origin iframe in HTML', enabledHtml.includes('<iframe src="/sub">'), enabledHtml);
 	const bpEnabled = JSON.parse(decodeURIComponent(irp._shimSrc(TARGET).split('?bp=')[1]));
-	eq('_shimSrc includes iframeRewrite:true when enabled', bpEnabled.iframeRewrite, true);
+	eq('_shimSrc includes iframeRewrite:true', bpEnabled.iframeRewrite, true);
 
 	// Shipped SHIM_JS assertions
 	for (const token of ['MutationObserver', 'attributeFilter:["src"]', 'HTMLIFrameElement', 'HTMLFrameElement']) {

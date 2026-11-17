@@ -5,13 +5,13 @@
 ### Changed
 
 - Proxy: **per-target origin isolation (`http://t-<12hex>.localhost:<port>`)** replaces the single shared `127.0.0.1:<port>` origin and `_lastTarget` state. Each upstream origin maps deterministically to its own loopback subdomain, removing global `cache-control: no-store` overrides (upstream browser caching works normally), eliminating cross-target `_lastTarget` races, and isolating `CookieJar` / storage per target.
-- Proxy: **`browser.proxyCookieJar` and `browser.proxyIframeRewrite` now default to `true`** (when `browser.proxyEnabled` is on), and child `<iframe>` rewriting covers both same-origin and cross-origin `http(s)://` sub-frames.
+- Settings: simplified configuration to three core settings (`browser.defaultUrl`, `browser.retainContextWhenHidden`, `browser.proxyEnabled`). Proxy cookie jar, child `<iframe>` rewriting (same-origin and cross-origin), self-signed cert acceptance for local dev, and the 200-entry history limit are now built-in defaults rather than separate toggles (`browser.proxyCookieJar`, `browser.proxyIframeRewrite`, `browser.acceptSelfSignedCerts`, `browser.historyLimit` removed).
 - Extension host: **last URL, history and closed state are now shared across workspaces** (`globalState` instead of `workspaceState`); Clear storage clears that single shared state. Existing per-workspace entries are not migrated (history and last URL start fresh on upgrade), and a workspace-scoped `browser.defaultUrl` now mainly acts as the **Home** button target once a global last URL is recorded.
 
 ### Added
 
-- Proxy: extension-host cookie jar (`browser.proxyCookieJar`, default `true`) that holds upstream `Set-Cookie` sessions per target origin in OS-encrypted `SecretStorage` without exposing cookies to the browser, plus the **Browser: Clear Proxied Logins** (`browser.clearProxiedLogins`) command.
-- Proxy: child `<iframe>` rewriting (`browser.proxyIframeRewrite`, default `true`) so nested same-origin and cross-origin frames receive the shim and relay `window.open` / `target=_blank` / clipboard writes upward without polluting URL tracking (`pageNavigated` is not relayed).
+- Proxy: built-in extension-host cookie jar that holds upstream `Set-Cookie` sessions per target origin in OS-encrypted `SecretStorage` without exposing cookies to the browser, plus the **Browser: Clear Proxied Logins** (`browser.clearProxiedLogins`) command.
+- Proxy: built-in child `<iframe>` rewriting (same-origin and cross-origin `http(s)://`) so nested frames receive the shim and relay `window.open` / `target=_blank` / clipboard writes upward without polluting URL tracking (`pageNavigated` is not relayed).
 
 ## [0.4.5] - 2026-11-13
 
