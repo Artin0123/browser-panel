@@ -5,7 +5,7 @@ import * as path from 'path';
 import * as vscode from 'vscode';
 import { getConfig } from './config';
 import { localize } from './i18n';
-import { FrameProxy } from './proxy';
+import { FrameProxy, isLocalDevHost } from './proxy';
 
 interface WebviewMessage {
 	type:
@@ -409,11 +409,11 @@ export class BrowserViewProvider implements vscode.WebviewViewProvider {
 			}
 			const lib = u.protocol === 'https:' ? https : http;
 			let timer: NodeJS.Timeout | undefined;
-			// Self-signed certs (typical for local https dev) must not be misreported
-			// as unreachable. No credentials are sent (cookies don't exist here).
+			// Self-signed certs (typical for local/LAN https dev) must not be misreported
+			// as unreachable; public HTTPS hosts still enforce TLS certificate validation.
 			const req = lib.get(
 				u,
-				{ headers: { 'user-agent': 'browser-panel' }, rejectUnauthorized: false },
+				{ headers: { 'user-agent': 'browser-panel' }, rejectUnauthorized: !isLocalDevHost(u.hostname) },
 				(res) => {
 					if (timer) {
 						clearTimeout(timer);

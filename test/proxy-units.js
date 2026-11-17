@@ -43,7 +43,7 @@ esbuild.buildSync({
 	logLevel: 'silent',
 });
 
-const { FrameProxy, SHIM_JS } = require(BUNDLE);
+const { FrameProxy, SHIM_JS, isLocalDevHost } = require(BUNDLE);
 const {
 	CookieJar,
 	domainMatch,

@@ -312,6 +312,32 @@ interface ProxyTarget {
 	url: URL;
 }
 
+/**
+ * Only local/loopback/private-LAN dev hosts may use self-signed TLS certs;
+ * public internet HTTPS hosts always enforce standard certificate validation.
+ */
+export function isLocalDevHost(hostname: string): boolean {
+	const h = hostname.replace(/^\[|\]$/g, '').toLowerCase();
+	if (!h) {
+		return false;
+	}
+	if (h === 'localhost' || h.endsWith('.localhost') || h.endsWith('.local')) {
+		return true;
+	}
+	if (h === '::1' || h === '0:0:0:0:0:0:0:1' || /^f[cd][0-9a-f]{2}:/.test(h) || /^fe[89ab][0-9a-f]:/.test(h)) {
+		return true;
+	}
+	if (
+		/^127\.\d{1,3}\.\d{1,3}\.\d{1,3}$/.test(h) ||
+		/^10\.\d{1,3}\.\d{1,3}\.\d{1,3}$/.test(h) ||
+		/^192\.168\.\d{1,3}\.\d{1,3}$/.test(h) ||
+		/^172\.(1[6-9]|2\d|3[01])\.\d{1,3}\.\d{1,3}$/.test(h)
+	) {
+		return true;
+	}
+	return false;
+}
+
 export class FrameProxy {
 	private _server: http.Server | undefined;
 	private _port = 0;
@@ -644,15 +670,14 @@ export class FrameProxy {
 		this._upgradeSockets.add(socket);
 		socket.on('close', () => this._upgradeSockets.delete(socket));
 		const lib = target.url.protocol === 'https:' ? https : http;
-		// Local https dev servers are typically self-signed and must render through
-		// the proxy. The server binds to 127.0.0.1 behind a path token.
+		// Accept self-signed certs for local/LAN dev hosts; enforce TLS for public hosts.
 		const preq = lib.request({
 			hostname: target.url.hostname,
 			port: target.url.port || (target.url.protocol === 'https:' ? 443 : 80),
 			path: target.url.pathname + target.url.search,
 			method: req.method,
 			headers: this._outgoingHeaders(req, target, DROP_UPGRADE_HEADERS),
-			rejectUnauthorized: false,
+			rejectUnauthorized: !isLocalDevHost(target.url.hostname),
 		});
 		preq.on('upgrade', (res: http.IncomingMessage, upSocket: import('stream').Duplex, upHead: Buffer) => {
 			this._upgradeSockets.add(upSocket);
@@ -1185,7 +1210,7 @@ export class FrameProxy {
 				path: target.url.pathname + target.url.search,
 				method: req.method || 'GET',
 				headers: this._outgoingHeaders(req, target),
-				rejectUnauthorized: false,
+				rejectUnauthorized: !isLocalDevHost(target.url.hostname),
 			},
 			(pres) => {
 				this._pipeOrInjectHtml(pres, res, target, req.method || 'GET');
