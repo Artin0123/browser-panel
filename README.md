@@ -38,20 +38,18 @@ Embedded browser for the VS Code **bottom panel / secondary sidebar** — defaul
 |---------|---------|-------------|
 | `browser.defaultUrl` | `http://localhost:80` | Default URL (Home target). Change the port by editing the URL. |
 | `browser.retainContextWhenHidden` | `true` | Keep page state (scroll, forms, JS state) alive while the view is hidden. Set to `false` and collapse the panel to fully release the page when unused. Takes effect after reload. |
-| `browser.historyLimit` | `200` | Maximum history entries to keep (oldest removed first, clamped to 1–10000). |
-| `browser.proxyEnabled` | `false` | Render sites that refuse to be framed by routing them through a local proxy (any localhost or http(s) site, not Next.js-specific). Pages then live on `http://127.0.0.1:<port>`, and logins do not persist. The port is sticky, so a proxied site's localStorage survives editor restarts. Details: `docs/PROXY.md`. |
-| `browser.acceptSelfSignedCerts` | `true` | Accept self-signed certificates when loading pages (proxy mode) and during the reachability probe. Keep on for local https dev servers; turn off to enforce certificate validation everywhere (self-signed hosts then show as unreachable). |
+| `browser.proxyEnabled` | `false` | Render sites that refuse to be framed by routing them through a local per-target proxy (`http://t-<12hex>.localhost:<port>`). Strips framing headers, rewrites nested iframes, holds server-side session cookies per target origin in OS-encrypted `SecretStorage` (clear via **Browser: Clear Proxied Logins**), and accepts self-signed local dev certs. The port is sticky, so each proxied site's `localStorage` and browser cache survive editor restarts. Details: `docs/PROXY.md`. |
 
 > **Close vs. hidden**: a webview view is *hidden* when it leaves the layout — switching the panel tab to **Terminal**, collapsing the panel, switching the activity bar away (minimizing the OS window does not count). `retainContextWhenHidden` decides what happens then. **Close browser** is different: it unloads the page to free memory and remembers the last URL. Scroll position cannot survive an unload (cross-origin iframe — VS Code cannot read it).
 
 ## Known limitations
 
 - **Framing-blocked sites** (`X-Frame-Options`, CSP `frame-ancestors`, or a server-side check on `Sec-Fetch-Dest`) show a "Site cannot be embedded" page unless `browser.proxyEnabled` is on. Sites that block by JS, or that need a login, can still come up blank — use **Open in external browser**.
-- **Proxied pages appear to live on `127.0.0.1`.** Sites that behave differently on localhost take their development branch there, and their buttons may do nothing at all.
-- **Logins do not carry over.** The panel and your normal browser are separate processes with separate cookie stores, and the proxy drops cookies by design. Signing in elsewhere never signs the panel in; with the proxy off, a login made inside the panel does persist.
-- **New tabs and `target=_blank` / `_top` / `_parent`** go to the system browser when the proxy is on. With the proxy off, the webview sandbox drops them silently — use the menu **Open in external browser**. Flows that need a real session (OAuth, heavy JS apps, PayPal, Microsoft sign-in) do not work in the panel either way.
+- **Proxied pages run on `http://t-<12hex>.localhost:<port>`.** Sites that check for an exact `https://` origin or real `127.0.0.1`/`localhost` hostname behave accordingly.
+- **External browser logins & OAuth do not carry over.** The panel and your normal browser are separate processes with separate cookie stores. In proxy mode, server-side `Set-Cookie` sessions made inside the panel are held per target origin by the extension host (`SecretStorage`), while third-party OAuth flows still require **Open in external browser**.
+- **New tabs and `target=_blank` / `_top` / `_parent`** (including inside same-origin and cross-origin child iframes) go to the system browser when the proxy is on. With the proxy off, the webview sandbox drops them silently — use the menu **Open in external browser**. Flows that need a real browser OAuth session (Google, PayPal, Microsoft sign-in) do not work in the panel either way.
 - **Find in page** is unavailable: the embedded page is a cross-origin iframe, which the webview's find widget cannot search. Service Workers, downloads, notifications, `alert` / `confirm` / `prompt` and some device APIs also do not work.
-- **Clear storage** clears this extension's history and last URL only, not the embedded site's cookies or localStorage.
+- **Clear storage** clears this extension's history, last URL, and closed state (shared across workspaces); use **Browser: Clear Proxied Logins** to clear proxy-held session cookies.
 - **Protocols**: `http` and `https` only; `file://` is not supported. After an in-frame redirect, the address bar keeps the URL you typed (the final URL of a cross-origin iframe is unreadable).
 - Mechanisms, measurements and edge cases: `docs/PROXY.md`.
 
