@@ -681,6 +681,16 @@ eq('pathMatch /foo vs /foo is true', pathMatch('/foo', '/foo'), true);
 }
 
 // ---------------------------------------------------------------------------
+// isLocalDevHost: self-signed TLS tolerance is strictly scoped to local/LAN hosts.
+// ---------------------------------------------------------------------------
+for (const h of ['localhost', 'app.localhost', '127.0.0.1', '127.0.1.1', '::1', '[::1]', 'dev.local', '10.0.0.5', '192.168.1.10', '172.16.0.1', '172.31.255.254']) {
+	eq('isLocalDevHost accepts ' + h, isLocalDevHost(h), true);
+}
+for (const h of ['', 'example.com', 'antigravity.google.com', 'localhost.evil.com', '8.8.8.8', '172.15.0.1', '172.32.0.1', '192.167.1.1']) {
+	eq('isLocalDevHost rejects ' + (h || '(empty)'), isLocalDevHost(h), false);
+}
+
+// ---------------------------------------------------------------------------
 try {
 	fs.unlinkSync(BUNDLE);
 	fs.unlinkSync(JAR_BUNDLE);
