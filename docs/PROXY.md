@@ -78,7 +78,7 @@
 shim 做四件事，都經 `parent.postMessage` 交給 webview：
 
 - `window.open` 與 `a[target=_blank|_new]` → `openExternal`，交給系統瀏覽器。
-- Clipboard `writeText` 被 Permissions Policy 擋下 → `copyText` → `vscode.env.clipboard.writeText`。
+- Clipboard 寫入（`writeText`／`write`／`execCommand('copy')`）在政策禁止或宿主權限拒絕時 → `copyText` → `vscode.env.clipboard.writeText`（當 `Permissions-Policy` 禁止時直接跳過原生呼叫，避免觸發 Blink `[Violation]` 日誌）。
 - `pageNavigated` 回報：document start、`load`、`popstate`、`hashchange`，以及 `pushState`／`replaceState`。iframe 的 `src` 屬性不隨 in-frame 導航更新，沒有這些回報，URL 欄、前進後退與可達性探測在第一次點連結後就失準。
 - `target="_top"`／`target="_parent"` 的「模擬意圖」。宿主給 webview iframe 的 sandbox 旗標是 `allow-scripts`、`allow-same-origin`、`allow-forms`、`allow-pointer-lock`、`allow-downloads`，**沒有 `allow-top-navigation`，也沒有 `allow-popups`**，要求換掉頂層文件的導航會被瀏覽器**靜默丟棄**：沒有錯誤、沒有日誌，頁面自己也觀察不到，看起來就是按鈕壞了。Google One Bar 的登入連結正是這個形狀。同站的 `_top`／`_parent` 改在面板內導航（絕對 href 先改寫成代理形態，否則 frame 會跑去真站、被 `X-Frame-Options` 擋成空白），跨站的交給系統瀏覽器，`javascript:`、`mailto:`、`tel:`、`data:`、`blob:`、`about:` 放行給瀏覽器。
 
@@ -128,7 +128,7 @@ CDN 只對站台的真實 origin 發 `Access-Control-Allow-Origin`。頁面若�
 
 代理模式下，頁面自己內嵌的子 `<iframe>`（無論同站或跨站 `http(s)://`）若以真實 origin 載入，會繞過 proxy 而沒有 shim，裡面的 `window.open`／`target=_blank` 會撞上外層 webview 沙箱（無 `allow-popups`）被擋。開啟 `browser.proxyEnabled` 後即自動啟用：
 
-1. **HTML 與動態 DOM 改寫**：代理端（`_rewriteIframeSrcs`）與 shim（sweep、`MutationObserver`、`HTMLIFrameElement`/`HTMLFrameElement` 的 `src` setter patch）會將同站子 iframe 改寫為根相對路徑、將跨站 `http(s)://` 子 iframe 改寫為各自獨立的 `t-<child>.localhost:<port>`（動態建立經 `/p/<token>/…` 302 落地），使每層子框架都能經過 proxy 並取得 shim。
+1. **HTML 與動態 DOM 改寫**：代理端（`_rewriteIframeSrcs`）與 shim（sweep、`MutationObserver`、`HTMLIFrameElement`/`HTMLFrameElement` 的 `src` setter 與 `setAttribute` patch）會將同站子 iframe 改寫為根相對路徑、將跨站 `http(s)://` 子 iframe 改寫為各自獨立的 `t-<child>.localhost:<port>`（動態建立經 `/p/<token>/…` 302 落地），並補齊 `allow="clipboard-read *; clipboard-write *"` 權限轉授，使每層子框架都能經過 proxy、保留剪貼簿政策並取得 shim。
 2. **多層上拋（不污染網址列）**：每層 shim 安裝 `message` relay listener，將子框架的 `openExternal` 與 `copy` 逐級上拋至頂層；明確不轉發 `pageNavigated`，避免子框架導航污染網址列與前進／後退堆疊。
 3. **非架構級的小邊角（視需要局部補即可）**：不處理 `srcdoc`／`about:blank` + `document.write`（避免干擾沙箱與文件寫入流程，詳見 [IFRAME-SHIM-DESIGN.md](IFRAME-SHIM-DESIGN.md)）；`SHIM_JS` 的點擊監聽沿 `e.target` 往父節點尋找 `<a>`，未穿透 Shadow DOM（真遇到時改用 `e.composedPath()` 即可）。
 
@@ -138,11 +138,11 @@ CDN 只對站台的真實 origin 發 `Access-Control-Allow-Origin`。頁面若�
 
 - **把 localhost 當開發環境或檢查真實 `https://` Origin 的站台**：因為代理模式下頁面在 `http://t-<12hex>.localhost:<port>`。例如 `antigravity.google.com` 的藍色 Sign in 按鈕在非真實 `https://` 環境下會走空分支；而 `window.location` 與 `Location.prototype.href` 在瀏覽器規範中為不可配置屬性（重新定義會拋 `TypeError`），shim 無法攔截 `location.href = …` 直接賦值。
 - **第三方 OAuth／系統瀏覽器憑證回流／顯式真實 `targetOrigin` 的跨框架 `postMessage`**：OAuth `redirect_uri` 鎖死真實網域、系統瀏覽器與 Webview session 隔離，且改寫後的子 iframe origin 為 `t-<id>.localhost:<port>`。
-- **Webview 宿主硬體與權限限制**：外層沙箱無 `allow-popups`／`allow-top-navigation`，`Permissions-Policy` 擋下 WebUSB／WebBluetooth／通知／支付等 API，以及 WebRTC／BYOA 遠端連線策略限制。
+- **Webview 宿主硬體與權限限制**：外層沙箱無 `allow-popups`／`allow-top-navigation`，`Permissions-Policy` 擋下 WebUSB／WebBluetooth／通知／支付等 API，Electron 主行程權限處理器拒絕非 `vscode-webview://` 來源的 `clipboard.readText()`／`read()` 主動讀取剪貼簿（鍵盤 `Ctrl+V` 的 `paste` 事件不受影響），以及 WebRTC／BYOA 遠端連線策略限制。
 - 頁面用 `<form target="_top|_blank">`、`<meta http-equiv="refresh">`、`<area>`、腳本裡的 `form.submit()` 離開 frame 時，shim 不介入，行為與 sandbox 預設相同。
 - JS 寫死的絕對 `https://` `fetch`/XHR URL 會直接發往上游，受站台 CORS 限制（例如需 `Access-Control-Allow-Credentials` 加上站台 cookie 的跨源遙測請求）。
 - Service Worker 在代理模式下刻意回 404（不執行）。
 
 ## 測試
 
-`npm test` 跑 `test/proxy-units.js`（150 項檢查）與 `test/webview-units.js`（70 項檢查）：用專案自己的 esbuild 打包 `src/proxy.ts` 再斷言，測的是出貨碼。涵蓋 `t-<12hex>.localhost` 目標隔離與 Host 防護、CSP 政策清單與 nonce 抬升、`crossorigin` 剝離、shim 注入點與多層 relay、`Sec-Fetch-Dest` 映射、SSRF 拒絕、`Next-Url`／`Referer` 映射、CookieJar、重定向改寫與上游快取保留。
+`npm test` 跑 `test/proxy-units.js`（180 項檢查）與 `test/webview-units.js`（73 項檢查）：用專案自己的 esbuild 打包 `src/proxy.ts` 再斷言，測的是出貨碼。涵蓋 `t-<12hex>.localhost` 目標隔離與 Host 防護、CSP 政策清單與 nonce 抬升、`crossorigin` 剝離、shim 注入點與多層 relay、`Sec-Fetch-Dest` 映射、SSRF 拒絕、`Next-Url`／`Referer` 映射、CookieJar、剪貼簿政策預檢與子框架權限轉授、重定向改寫與上游快取保留。

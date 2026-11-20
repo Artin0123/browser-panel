@@ -1046,7 +1046,7 @@ import { svgIcon } from './icons.js';
 				return;
 			}
 			if (msg.type === 'copy' && typeof msg.text === 'string') {
-				// Prefer extension-host clipboard (webview Permissions-Policy often still blocks).
+				// Relay via extension host so writes succeed regardless of iframe focus or host permission checks.
 				vscode.postMessage({ type: 'copyText', text: msg.text });
 				return;
 			}

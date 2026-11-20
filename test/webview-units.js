@@ -106,5 +106,17 @@ for (const good of ['http://example.com/', 'https://example.com/', 'http://127.0
   check('gate passes ' + good, isFrameSrc(good) === true);
 }
 
+// #browser-frame must delegate Permissions-Policy with '*' (not bare 'src',
+// which breaks after the 302 bounce from 127.0.0.1 to t-<hash>.localhost or any
+// cross-origin redirect).
+const htmlSource = fs.readFileSync(path.join(__dirname, '..', 'src', 'webview', 'index.html'), 'utf8');
+const frameTag = (htmlSource.match(/<iframe\b[^>]*\bid="browser-frame"[^>]*>/i) || [''])[0];
+const allowAttr = (frameTag.match(/\ballow="([^"]*)"/i) || ['', ''])[1];
+for (const directive of ['clipboard-read *', 'clipboard-write *', 'fullscreen *']) {
+  check('#browser-frame allow delegates ' + directive,
+    allowAttr.split(';').map((s) => s.trim()).includes(directive),
+    'got allow="' + allowAttr + '"');
+}
+
 console.log('webview units: ' + (checks - failed) + '/' + checks + ' checks passed');
 process.exit(failed ? 1 : 0);

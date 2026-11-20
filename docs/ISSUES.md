@@ -15,7 +15,7 @@
 | 3 | 狀態儲存範圍 | **三鍵（`lastUrl` / `history` / `closed`）皆存 `globalState`**，跨工作區共用、不遷移舊資料（2026-11-16 修訂，見 [GLOBAL-STORAGE-DESIGN.md](GLOBAL-STORAGE-DESIGN.md)）。 |
 | 4 | 自動重連範圍 | **A：僅連線失敗**（`ok: false`）。`frameBlocked`（禁內嵌）不自動重試。 |
 | 5 | 重連節奏 | **A：固定 10 秒**倒數；僅「取消自動重試」（與錯誤頁其他按鈕同款 `empty-btn`）；換網址／關閉／隱藏錯誤頁即停。工具列重新整理仍可手動重試。 |
-| 6 | 剪貼簿 | **B**：iframe 加 `allow`（盡力）；**可靠路徑需 `proxyEnabled`**：shim 攔截 `writeText` 的 `NotAllowedError`，經 webview → `copyText` → `vscode.env.clipboard.writeText`。直連跨來源無法注入 shim，Permissions Policy 錯誤仍會出現。 |
+| 6 | 剪貼簿 | **B**：iframe 加 `allow="clipboard-read *; clipboard-write *; fullscreen *"`（跨源重定向與 `t-<id>.localhost` 仍保留政策）；**可靠寫入路徑需 `proxyEnabled`**：shim 在政策禁止時直接走 `copyText`、否則於原生寫入拒絕時轉送 `vscode.env.clipboard.writeText`。直連跨來源無法注入 shim（遇目標站自帶封鎖標頭或 Electron 宿主權限拒絕時仍受限）。 |
 | 7–8 | 頁內另開分頁 | **等同選單「在外部瀏覽器開啟」**：經同一條 `openExternal` → `vscode.env.openExternal`。僅 **`browser.proxyEnabled`** 時以**外部 shim 腳本**攔截 `window.open` 與 `a[target=_blank]`。未開 proxy 請用選單。 |
 
 ---
@@ -45,7 +45,7 @@
 
 ### 3. 實作（對應定案 6、7–8）
 
-1. iframe 加上 `allow="clipboard-read; clipboard-write; …"`（盡力；VS Code 外層 Permissions-Policy 常仍擋，見下方錯誤）。
+1. `#browser-frame` 加上 `allow="clipboard-read *; clipboard-write *; fullscreen *"`（必須帶 `*`，否則預設 `'src'` 會在代理 `302` 跳往 `t-<12hex>.localhost:<port>` 後失去權限；若上游另設 `Permissions-Policy` 擋寫入，shim 會預先檢查並略過原生呼叫以避開 `[Violation]` 警告）。
 2. Webview 監聽 iframe `postMessage`：`openExternal` → Host；`copy` → Host `copyText` → `vscode.env.clipboard.writeText`。
 3. Proxy：對 `text/html` 注入 `<script src="/p/<token>/__bp_shim.js">`；shim 攔截 `window.open`／`target=_blank`，以及 `clipboard.writeText` 的 `NotAllowedError` 後轉送父層。**不做** `<base>`／路徑改寫。
 

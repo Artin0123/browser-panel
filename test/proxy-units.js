@@ -152,8 +152,64 @@ ok('SHIM_JS reads its own ?bp= mapping', SHIM_JS.includes('document.currentScrip
 	ok('SHIM_JS execCommand("copy") relays selected textarea text',
 		posted.some((m) => m.type === 'copy' && m.text === 'copied-via-exec'), posted);
 
-	// 2. writeText, write(ClipboardItem), permissions.query
+	// 2. writeText, write(ClipboardItem), permissions.query + Permissions-Policy precheck
+	let nativeCallsWhenBlocked = 0;
+	const blockedPosted = [];
+	{
+		function BlockedDoc() {}
+		const bdoc = new BlockedDoc();
+		bdoc.currentScript = doc.currentScript;
+		bdoc.addEventListener = () => {};
+		bdoc.featurePolicy = { allowsFeature: () => false };
+		const bctx = {
+			URL,
+			Document: BlockedDoc,
+			document: bdoc,
+			location: ctx.location,
+			history: ctx.history,
+			parent: { postMessage(m) { blockedPosted.push(m); } },
+			navigator: {
+				clipboard: {
+					writeText: () => { nativeCallsWhenBlocked++; return Promise.reject(new Error('violation')); },
+					write: () => { nativeCallsWhenBlocked++; return Promise.reject(new Error('violation')); },
+					readText: () => { nativeCallsWhenBlocked++; return Promise.resolve('leak'); },
+					read: () => { nativeCallsWhenBlocked++; return Promise.resolve([]); },
+				},
+				permissions: {
+					query: (d) => {
+						if (d.name === 'clipboard-write') nativeCallsWhenBlocked++;
+						return Promise.resolve({ state: 'denied' });
+					},
+				},
+			},
+			addEventListener: () => {},
+			setTimeout,
+		};
+		bctx.window = bctx;
+		vm.runInNewContext(SHIM_JS, bctx);
+		globalThis.__blockedClipChecks = Promise.all([
+			bctx.navigator.clipboard.writeText('no-violation-wt'),
+			bctx.navigator.clipboard.write([{
+				types: ['text/plain'],
+				getType: () => Promise.resolve({ text: () => Promise.resolve('no-violation-wr') }),
+			}]),
+			bctx.navigator.permissions.query({ name: 'clipboard-write' }),
+			bctx.navigator.clipboard.readText().then(() => 'resolved', (e) => e.name),
+			bctx.navigator.clipboard.read().then(() => 'resolved', (e) => e.name),
+		]).then(([, , bcw, rtErr, rdErr]) => {
+			eq('SHIM_JS skips native clipboard calls when Permissions-Policy blocks feature', nativeCallsWhenBlocked, 0);
+			ok('SHIM_JS still relays writeText when Permissions-Policy blocks feature',
+				blockedPosted.some((m) => m.type === 'copy' && m.text === 'no-violation-wt'));
+			ok('SHIM_JS still relays write(ClipboardItem) when Permissions-Policy blocks feature',
+				blockedPosted.some((m) => m.type === 'copy' && m.text === 'no-violation-wr'));
+			eq('SHIM_JS grants clipboard-write query without native call when policy blocks', bcw.state, 'granted');
+			eq('SHIM_JS readText rejects with NotAllowedError without native call when policy blocks', rtErr, 'NotAllowedError');
+			eq('SHIM_JS read rejects with NotAllowedError without native call when policy blocks', rdErr, 'NotAllowedError');
+		});
+	}
+
 	globalThis.__shimChecks = Promise.all([
+		globalThis.__blockedClipChecks,
 		ctx.navigator.clipboard.writeText('hello-wt'),
 		ctx.navigator.clipboard.write([{
 			types: ['text/plain'],
@@ -161,7 +217,7 @@ ok('SHIM_JS reads its own ?bp= mapping', SHIM_JS.includes('document.currentScrip
 		}]),
 		ctx.navigator.permissions.query({ name: 'clipboard-write' }),
 		ctx.navigator.permissions.query({ name: 'geolocation' }),
-	]).then(([, , cw, geo]) => {
+	]).then(([, , , cw, geo]) => {
 		ok('SHIM_JS writeText fallback relays copy',
 			posted.some((m) => m.type === 'copy' && m.text === 'hello-wt'));
 		ok('SHIM_JS write(ClipboardItem) fallback relays text/plain',
@@ -177,10 +233,9 @@ ok('SHIM_JS reads its own ?bp= mapping', SHIM_JS.includes('document.currentScrip
 ok('_shimSrc points at the shim path', p._shimSrc(TARGET).startsWith('/p/' + TOKEN + '/__bp_shim.js?bp='));
 {
 	const bp = JSON.parse(decodeURIComponent(p._shimSrc(TARGET).split('?bp=')[1]));
-	eq('_shimSrc ?bp= describes target origin + prefix + iframeRewrite', bp, {
+	eq('_shimSrc ?bp= describes target origin + prefix', bp, {
 		origin: 'https://site.test',
 		prefix: '/p/' + TOKEN + '/',
-		iframeRewrite: true,
 	});
 }
 eq('_parseTarget keeps path + query',
@@ -573,19 +628,29 @@ eq('pathMatch /foo vs /foo is true', pathMatch('/foo', '/foo'), true);
 	const IR_TOK = TOKEN;
 
 	// _rewriteIframeSrcs cases
-	eq('_rewriteIframeSrcs rewrites same-origin double-quoted src',
+	eq('_rewriteIframeSrcs rewrites same-origin double-quoted src and delegates clipboard allow',
 		irp._rewriteIframeSrcs('<iframe src="https://site.test/sub/a?x=1#h"></iframe>', TARGET),
-		'<iframe src="/sub/a?x=1#h"></iframe>');
+		'<iframe src="/sub/a?x=1#h" allow="clipboard-read *; clipboard-write *"></iframe>');
 	eq('_rewriteIframeSrcs rewrites same-origin single-quoted src',
 		irp._rewriteIframeSrcs("<IFRAME id='f' SRC='https://site.test/b'></IFRAME>", TARGET),
-		"<IFRAME id='f' SRC='/b'></IFRAME>");
+		"<IFRAME id='f' SRC='/b' allow=\"clipboard-read *; clipboard-write *\"></IFRAME>");
 	eq('_rewriteIframeSrcs rewrites same-origin unquoted src',
 		irp._rewriteIframeSrcs('<iframe src=https://site.test/c></iframe>', TARGET),
-		'<iframe src="/c"></iframe>');
-	eq('_rewriteIframeSrcs rewrites cross-origin iframe to per-target origin',
+		'<iframe src="/c" allow="clipboard-read *; clipboard-write *"></iframe>');
+	eq('_rewriteIframeSrcs rewrites cross-origin iframe to per-target origin with wildcard clipboard allow',
 		irp._rewriteIframeSrcs('<iframe src="https://accounts.google.com/o/oauth2"></iframe>', TARGET),
-		`<iframe src="${irp._registerTarget(new URL('https://accounts.google.com')).proxyOrigin}/o/oauth2"></iframe>`);
-	eq('_rewriteIframeSrcs leaves /p/ prefix, root-relative, srcdoc, about:blank, javascript:, data-src alone',
+		`<iframe src="${irp._registerTarget(new URL('https://accounts.google.com')).proxyOrigin}/o/oauth2" allow="clipboard-read *; clipboard-write *"></iframe>`);
+	eq('_rewriteIframeSrcs merges existing allow, upgrades bare or subdomain-wildcard origin, respects explicit none, ignores allowfullscreen',
+		irp._rewriteIframeSrcs(
+			'<iframe allowfullscreen allow="fullscreen; clipboard-write" src="https://site.test/v"></iframe>' +
+			'<iframe allow="clipboard-write https://*.google.com; clipboard-read \'src\'" src="https://accounts.google.com/o"></iframe>' +
+			'<iframe allow="clipboard-write \'none\'" src="https://site.test/w"></iframe>',
+			TARGET
+		),
+		'<iframe allowfullscreen allow="fullscreen; clipboard-write *; clipboard-read *" src="/v"></iframe>' +
+		`<iframe allow="clipboard-write *; clipboard-read *" src="${irp._registerTarget(new URL('https://accounts.google.com')).proxyOrigin}/o"></iframe>` +
+		'<iframe allow="clipboard-write \'none\'; clipboard-read *" src="/w"></iframe>');
+	eq('_rewriteIframeSrcs delegates allow on /p/ prefix & root-relative, leaves srcdoc, about:blank, javascript:, data-src, bare alone',
 		irp._rewriteIframeSrcs(
 			`<iframe src="/p/${IR_TOK}/https/site.test/x"></iframe>` +
 			'<iframe src="/already"></iframe>' +
@@ -596,8 +661,8 @@ eq('pathMatch /foo vs /foo is true', pathMatch('/foo', '/foo'), true);
 			'<iframe></iframe>',
 			TARGET
 		),
-		`<iframe src="/p/${IR_TOK}/https/site.test/x"></iframe>` +
-		'<iframe src="/already"></iframe>' +
+		`<iframe src="/p/${IR_TOK}/https/site.test/x" allow="clipboard-read *; clipboard-write *"></iframe>` +
+		'<iframe src="/already" allow="clipboard-read *; clipboard-write *"></iframe>' +
 		'<iframe srcdoc="<p>hi</p>"></iframe>' +
 		'<iframe src="about:blank"></iframe>' +
 		'<iframe src="javascript:void(0)"></iframe>' +
@@ -607,34 +672,44 @@ eq('pathMatch /foo vs /foo is true', pathMatch('/foo', '/foo'), true);
 		irp._rewriteIframeSrcs('<iframe src="http://[::1"></iframe>', TARGET),
 		'<iframe src="http://[::1"></iframe>');
 
-	// Child iframe rewrite is always enabled in _injectShimTag & _shimSrc
+	// Child iframe rewrite is always enabled in _injectShimTag
 	const enabledHtml = irp._injectShimTag(Buffer.from('<head></head><iframe src="https://site.test/sub"></iframe>'), TARGET, undefined).html.toString('utf8');
-	ok('_injectShimTag rewrites same-origin iframe in HTML', enabledHtml.includes('<iframe src="/sub">'), enabledHtml);
-	const bpEnabled = JSON.parse(decodeURIComponent(irp._shimSrc(TARGET).split('?bp=')[1]));
-	eq('_shimSrc includes iframeRewrite:true', bpEnabled.iframeRewrite, true);
+	ok('_injectShimTag rewrites same-origin iframe in HTML', enabledHtml.includes('<iframe src="/sub" allow="clipboard-read *; clipboard-write *">'), enabledHtml);
 
 	// Shipped SHIM_JS assertions
 	for (const token of ['MutationObserver', 'attributeFilter:["src"]', 'HTMLIFrameElement', 'HTMLFrameElement']) {
 		ok('SHIM_JS includes ' + token, SHIM_JS.includes(token));
 	}
 
-	// Execute SHIM_JS with iframeRewrite=true & empty prefix to test P2/P3/P4
+	// Execute SHIM_JS to test P2 (src/allow setters + unified setAttribute) & P3 (relay)
 	const posted = [];
 	const listeners = {};
 	function Document() {}
 	Document.prototype.execCommand = () => false;
-	function HTMLIFrameElement() {}
+	function Element() { this._attrs = {}; }
+	Element.prototype.getAttribute = function (k) { const lk = String(k).toLowerCase(); return Object.prototype.hasOwnProperty.call(this._attrs, lk) ? this._attrs[lk] : null; };
+	Element.prototype.setAttribute = function (k, v) { this._attrs[String(k).toLowerCase()] = String(v); };
+	function HTMLIFrameElement() { Element.call(this); }
+	HTMLIFrameElement.prototype = Object.create(Element.prototype);
+	HTMLIFrameElement.prototype.tagName = 'IFRAME';
 	let rawSrc = '';
+	let allowAtSrcAssign = null;
 	Object.defineProperty(HTMLIFrameElement.prototype, 'src', {
 		configurable: true,
 		enumerable: true,
 		get() { return rawSrc; },
-		set(v) { rawSrc = v; },
+		set(v) { allowAtSrcAssign = this._attrs.allow || null; rawSrc = v; this._attrs.src = String(v); },
+	});
+	Object.defineProperty(HTMLIFrameElement.prototype, 'allow', {
+		configurable: true,
+		enumerable: true,
+		get() { return this._attrs.allow || ''; },
+		set(v) { this._attrs.allow = String(v); },
 	});
 	const doc = new Document();
 	doc.currentScript = {
 		src: 'http://127.0.0.1:4599/p/' + TOKEN + '/__bp_shim.js?bp=' +
-			encodeURIComponent(JSON.stringify({ origin: 'https://site.test', prefix: '/p/' + TOKEN + '/', iframeRewrite: true })),
+			encodeURIComponent(JSON.stringify({ origin: 'https://site.test', prefix: '/p/' + TOKEN + '/' })),
 	};
 	doc.addEventListener = () => {};
 	doc.querySelectorAll = () => [];
@@ -643,6 +718,7 @@ eq('pathMatch /foo vs /foo is true', pathMatch('/foo', '/foo'), true);
 	const ctx = {
 		URL,
 		Document,
+		Element,
 		HTMLIFrameElement,
 		document: doc,
 		location: { href: 'http://127.0.0.1:4599/', origin: 'http://127.0.0.1:4599', pathname: '/', search: '', hash: '' },
@@ -657,13 +733,39 @@ eq('pathMatch /foo vs /foo is true', pathMatch('/foo', '/foo'), true);
 	vm.runInContext(SHIM_JS, ctx);
 	const vmWindow = vm.runInContext('window', ctx);
 
-	// P2: HTMLIFrameElement.prototype.src setter rewrites same-origin URL synchronously
+	// P2: HTMLIFrameElement.prototype.src & .allow setters + unified Element.prototype.setAttribute
 	const frameEl = new HTMLIFrameElement();
 	frameEl.src = 'https://site.test/embed?a=1';
 	eq('SHIM_JS HTMLIFrameElement.src setter rewrites same-origin to root-relative', rawSrc, '/embed?a=1');
+	eq('SHIM_JS sets wildcard clipboard allow BEFORE assigning iframe.src',
+		allowAtSrcAssign, 'clipboard-read *; clipboard-write *');
+	frameEl.allow = 'fullscreen';
+	eq('SHIM_JS HTMLIFrameElement.allow setter preserves clipboard delegation when assigned after src',
+		frameEl.getAttribute('allow'), 'fullscreen; clipboard-read *; clipboard-write *');
+	frameEl._attrs.allow = 'fullscreen; clipboard-write https://*.other.test';
 	frameEl.src = 'https://other.test/embed';
 	eq('SHIM_JS HTMLIFrameElement.src setter rewrites cross-origin via prefix',
 		rawSrc, 'http://127.0.0.1:4599/p/' + TOKEN + '/https/other.test/embed');
+	eq('SHIM_JS upgrades subdomain-wildcard allow before cross-origin src navigation',
+		allowAtSrcAssign, 'fullscreen; clipboard-write *; clipboard-read *');
+
+	const frameAttrEl = new HTMLIFrameElement();
+	frameAttrEl.setAttribute('src', 'https://other.test/via-attr');
+	frameAttrEl.setAttribute('allow', 'autoplay');
+	eq('SHIM_JS unified setAttribute rewrites iframe src',
+		frameAttrEl.getAttribute('src'), 'http://127.0.0.1:4599/p/' + TOKEN + '/https/other.test/via-attr');
+	eq('SHIM_JS unified setAttribute preserves clipboard delegation when allow is set after src',
+		frameAttrEl.getAttribute('allow'), 'autoplay; clipboard-read *; clipboard-write *');
+
+	const scriptEl = new Element();
+	scriptEl.tagName = 'SCRIPT';
+	scriptEl.setAttribute('crossorigin', 'anonymous');
+	eq('SHIM_JS unified setAttribute drops script crossorigin without integrity',
+		scriptEl.getAttribute('crossorigin'), null);
+	scriptEl._attrs.integrity = 'sha384-abc';
+	scriptEl.setAttribute('crossorigin', 'anonymous');
+	eq('SHIM_JS unified setAttribute keeps script crossorigin when integrity is present',
+		scriptEl.getAttribute('crossorigin'), 'anonymous');
 
 	// P3: relay openExternal & copy, NEVER relay pageNavigated
 	posted.length = 0;
