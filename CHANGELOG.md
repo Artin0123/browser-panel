@@ -1,5 +1,19 @@
 # Changelog
 
+## [0.5.1] - 2026-11-20
+
+### Fixed
+
+- Webview & Proxy: **clipboard `Permissions-Policy` survives per-target origin `302` bounces and nested `<iframe>`s, and no longer logs `[Violation]` warnings.** `#browser-frame` previously declared `allow="clipboard-read; clipboard-write; …"` without `*`, which defaulted to `'src'` (`http://127.0.0.1:<port>`) and lost delegation immediately after bouncing to `http://t-<12hex>.localhost:<port>`. `#browser-frame` and rewritten child `<iframe>`s (static HTML, `src`/`allow` property setters, and a unified `Element.prototype.setAttribute` hook) now delegate `clipboard-read *; clipboard-write *` (upgrading bare or subdomain-wildcard directives while preserving explicit `'none'`). When an upstream `Permissions-Policy` header or `srcdoc` frame still disables clipboard access, `SHIM_JS` pre-checks `document.permissionsPolicy` / `document.featurePolicy` before calling the native Clipboard API — relaying writes directly via `postMessage` (`vscode.env.clipboard.writeText`) without triggering Blink's C++ `[Violation]` console warning.
+
+### Security
+
+- Proxy & Host probe: **self-signed TLS tolerance (`rejectUnauthorized: false`) is strictly scoped to local/LAN development hosts** (`localhost`, `*.localhost`, `127.0.0.0/8`, `::1`, `*.local`, and RFC 1918 private ranges `10/8`, `172.16/12`, `192.168/16`); public `https://` targets enforce standard certificate verification.
+
+### Docs & Tests
+
+- Synced `README.md` settings table and proxy limitations with `0.5.0`, documented clipboard delegation and Electron's `clipboard.readText()` host boundary in `docs/PROXY.md` / `docs/ISSUES.md`, and expanded `npm test` to 180 proxy checks and 73 webview checks.
+
 ## [0.5.0] - 2026-11-17
 
 ### Changed
