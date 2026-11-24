@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.5.2] - 2026-11-24
+
+### Fixed
+
+- Proxy: **copying and URL tracking no longer break across editor restarts when upstream HTML revalidates with `304 Not Modified`.** Since `0.5.0`, cached `text/html` documents on `t-<12hex>.localhost:<port>` retained the previous session's rotating `/p/<token>/__bp_shim.js` path; after an editor or extension-host restart on the same sticky port, `304 Not Modified` (or cached HTML) requested the old token path, answered `404 Not Found`, and left the page completely unshimmed. Navigation requests now strip `If-None-Match` / `If-Modified-Since`, injected `text/html` responses set `Cache-Control: no-store` and strip `ETag` / `Last-Modified` / `Expires` (while JS/CSS/font/image subresources keep full browser caching), and registered `t-<12hex>.localhost:<port>` origins also serve `SHIM_JS` for stale `/p/<old_token>/__bp_shim.js` paths without exposing the current session token.
+- Webview & Proxy: **replaced the `0.5.1` `allow="clipboard-*"` delegation workaround with direct extension-host clipboard bridging.** Electron's main-process permission check blocks native `navigator.clipboard` writes on every non-`vscode-webview://` origin regardless of `Permissions-Policy`, so delegating `clipboard-read *; clipboard-write *` on `#browser-frame` only suppressed Blink's `[Violation]` diagnostic while native writes still rejected silently. `#browser-frame` restores `allow="camera; microphone; geolocation; fullscreen *"` (without `clipboard-*`), and `SHIM_JS` now bridges `Clipboard.prototype` / `navigator.clipboard` (`writeText`, `write` for `text/plain` and `text/html`, with an explicit console warning on binary-only items) and `document.execCommand('copy')` (including `copy-to-clipboard` `clipboardData.setData` listeners and same-origin `srcdoc` / `about:blank` / `blob:` child `<iframe>`s) directly to `vscode.env.clipboard.writeText`.
+- Proxy: **`_cspForShim` handles CSP3 `script-src-elem` and `'strict-dynamic'` policies**, lifting shared nonces even when `'self'` is present alongside `'strict-dynamic'` and minting a fresh nonce when `'strict-dynamic'` appears with hashes only; `inPanel()` also routes same-site `target="_top"` / `_parent` links directly to root-relative paths on `t-<12hex>.localhost` origins without an extra `302` bounce.
+
 ## [0.5.1] - 2026-11-20
 
 ### Fixed
