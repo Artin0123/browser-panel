@@ -27,7 +27,7 @@
 - 根相對路徑（`/_next/static/…`、`/api/…`）直接依請求的 `Host` 標頭查表轉發至對應目標。目標 origin 由代理端鎖定，請求路徑不能改寫目標：`//host`、absolute-form、反斜線一律拒絕。
 - 同源 3xx 改寫成根相對路徑；跨源 3xx 預先註冊新目標並改寫為目標自己的 `http://t-<newId>.localhost:<port>/…`。
 - `dest=serviceworker` 的請求維持回 404（避免離線快取與代理重寫層衝突）。
-- **恢復上游快取（v0.5.0）**：各站台已擁有獨立的 `t-<12hex>.localhost:<port>` 瀏覽器快取分區，代理不再對一般資源強制覆寫 `cache-control: no-store`（僅 `/p/<token>/…` 的 302 bounce 本身保持 `no-store`），大型 SPA 的 JS/CSS bundle 可正常命中瀏覽器快取。
+- **恢復子資源上游快取（v0.5.0）**：各站台已擁有獨立的 `t-<12hex>.localhost:<port>` 瀏覽器快取分區，JS／CSS／圖片／字型等子資源完整保留 `ETag`、`304 Not Modified` 與 `Cache-Control` 快取；注入 shim 的 `text/html` 文檔回應則強制 `cache-control: no-store`（並剝除上游導航請求的 `If-None-Match`／`If-Modified-Since` 與回應的 `ETag`／`Last-Modified`／`Expires`），且在已註冊的 `t-<12hex>.localhost:<port>` 目標來源上相容舊階段快取 HTML 的 `/p/<舊token>/__bp_shim.js`（不暴露當下 secret token），確保跨 VS Code 重啟或擴充更新後絕不命中舊 HTML 快取導致 shim 404。
 - 探測回報 status ≥ 400 且 body 近乎空時，面板顯示 HTTP 錯誤頁而不是白屏（bot 防護站對 iframe 常回空的 403／404）。站台自己帶內容的錯誤頁照常渲染；4xx 不啟動自動重連，5xx 會。
 - Port 記在 globalState 並優先重用，被佔用或開第二個視窗時退回隨機 port。搭配確定性的 `t-<12hex>`，同一站台跨重啟的 Origin 固定，內嵌頁的 `localStorage`（例如 opencode 的配對 token）與快取才能跨重啟存活。
 - 地址欄永遠顯示目標 URL，不顯示代理 URL。
@@ -68,17 +68,17 @@
 
 頁面自帶 CSP 時，代理改寫政策讓這支腳本合法。一個 `Content-Security-Policy` 標頭值可以是用逗號分隔的**政策清單**，每條各自獨立強制執行，文件必須同時滿足全部（Google 的產品頁就送兩條：一條帶每次回應都不同的 `script-src` nonce，一條帶 `require-trusted-types-for` 與 `report-uri`）。因此政策從 `rawHeaders` 取（保留重名標頭）並按逗號切開，逐條處理：
 
-- 每條政策裡只有第一個 `script-src`（沒有則第一個 `default-src`）算數，後續重複的忽略。
-- 政策已允許 `'self'` 就原樣保留。
-- 政策用 nonce 收緊時，只有在所有這類政策共用同一顆 nonce 才借用它（一個標籤只能有一個 nonce 屬性），否則各自補 `'self'`；`'strict-dynamic'` 下借用 nonce 同樣有效。
-- 補 `'self'` 才能授權外部腳本：hash source 只匹配 inline 內容，而 Chromium 在 `'none'` 與其他來源並列時忽略 `'none'`。
-- 補在既有的 directive 上，不新增 `script-src`，否則會蓋掉 `default-src` 給頁面 inline script 的 `'unsafe-inline'`。
+- 每條政策依 CSP3 優先序檢查第一個 `script-src-elem`（沒有則第一個 `script-src`，再沒有則第一個 `default-src`），後續重複的忽略。
+- 政策已允許 `'self'` 且未啟用 `'strict-dynamic'` 時原樣保留（`'strict-dynamic'` 會讓 Chromium 忽略 `'self'`）。
+- 政策用 nonce 收緊（或含 `'strict-dynamic'` + nonce）時，只有在所有這類政策共用同一顆 nonce 才借用它（一個標籤只能有一個 nonce 屬性）；若含 `'strict-dynamic'` 但只有 hash（無共用 nonce），代理會簽發一顆隨機 base64 nonce 同時補進該 directive 與 `<script nonce="…">`；其餘情況各自補 `'self'`。
+- 補 `'self'` 才能授權無 `'strict-dynamic'` 的外部腳本：hash source 只匹配 inline 內容，而 Chromium 在 `'none'` 與其他來源並列時忽略 `'none'`。
+- 補在既有的 directive 上，不新增 `script-src`／`script-src-elem`，否則會蓋掉 `default-src` 給頁面 inline script 的 `'unsafe-inline'`。
 - 輸出時保持多條政策（多個標頭行）。
 
 shim 做四件事，都經 `parent.postMessage` 交給 webview：
 
 - `window.open` 與 `a[target=_blank|_new]` → `openExternal`，交給系統瀏覽器。
-- Clipboard 寫入（`writeText`／`write`／`execCommand('copy')`）在政策禁止或宿主權限拒絕時 → `copyText` → `vscode.env.clipboard.writeText`（當 `Permissions-Policy` 禁止時直接跳過原生呼叫，避免觸發 Blink `[Violation]` 日誌）。
+- Clipboard 寫入（`Clipboard.prototype` 與 `navigator.clipboard` 的 `writeText`／`write`，以及 `document.execCommand('copy')`）**直接**經 `postMessage` → `copyText` → `vscode.env.clipboard.writeText`（支援 `'text/plain'`、`'text/html'` 純文字擷取與 `copy-to-clipboard` 等透過 `copy` 事件 `clipboardData.setData` 寫入的函式庫；僅含圖片等二進位 `ClipboardItem` 時印出明確 `console.warn` 並 reject）。外層 `#browser-frame` 刻意**不**轉授 `allow="clipboard-read; clipboard-write"`：因為 VS Code Electron 主行程的 `setPermissionCheckHandler` 對所有 `http(s)://` 來源一律硬性拒絕原生剪貼簿寫入，轉授 `allow` 不會讓原生寫入成功，只會抹掉未受 shim 保護時的診斷錯誤。
 - `pageNavigated` 回報：document start、`load`、`popstate`、`hashchange`，以及 `pushState`／`replaceState`。iframe 的 `src` 屬性不隨 in-frame 導航更新，沒有這些回報，URL 欄、前進後退與可達性探測在第一次點連結後就失準。
 - `target="_top"`／`target="_parent"` 的「模擬意圖」。宿主給 webview iframe 的 sandbox 旗標是 `allow-scripts`、`allow-same-origin`、`allow-forms`、`allow-pointer-lock`、`allow-downloads`，**沒有 `allow-top-navigation`，也沒有 `allow-popups`**，要求換掉頂層文件的導航會被瀏覽器**靜默丟棄**：沒有錯誤、沒有日誌，頁面自己也觀察不到，看起來就是按鈕壞了。Google One Bar 的登入連結正是這個形狀。同站的 `_top`／`_parent` 改在面板內導航（絕對 href 先改寫成代理形態，否則 frame 會跑去真站、被 `X-Frame-Options` 擋成空白），跨站的交給系統瀏覽器，`javascript:`、`mailto:`、`tel:`、`data:`、`blob:`、`about:` 放行給瀏覽器。
 
@@ -128,9 +128,9 @@ CDN 只對站台的真實 origin 發 `Access-Control-Allow-Origin`。頁面若�
 
 代理模式下，頁面自己內嵌的子 `<iframe>`（無論同站或跨站 `http(s)://`）若以真實 origin 載入，會繞過 proxy 而沒有 shim，裡面的 `window.open`／`target=_blank` 會撞上外層 webview 沙箱（無 `allow-popups`）被擋。開啟 `browser.proxyEnabled` 後即自動啟用：
 
-1. **HTML 與動態 DOM 改寫**：代理端（`_rewriteIframeSrcs`）與 shim（sweep、`MutationObserver`、`HTMLIFrameElement`/`HTMLFrameElement` 的 `src` setter 與 `setAttribute` patch）會將同站子 iframe 改寫為根相對路徑、將跨站 `http(s)://` 子 iframe 改寫為各自獨立的 `t-<child>.localhost:<port>`（動態建立經 `/p/<token>/…` 302 落地），並補齊 `allow="clipboard-read *; clipboard-write *"` 權限轉授，使每層子框架都能經過 proxy、保留剪貼簿政策並取得 shim。
+1. **HTML 與動態 DOM 改寫 + 同源本地子框架自動補丁**：代理端（`_rewriteIframeSrcs`）與 shim（sweep、`MutationObserver`、`HTMLIFrameElement`/`HTMLFrameElement` 的 `src` setter 與 `setAttribute` patch）會將同站子 iframe 改寫為根相對路徑、將跨站 `http(s)://` 子 iframe 改寫為各自獨立的 `t-<child>.localhost:<port>`（動態建立經 `/p/<token>/…` 302 落地），使每層網路子框架都經過 proxy 並取得 shim；對於不經 HTTP 代理的同源 `srcdoc`、空 `src`、`about:blank` 與 `blob:` 子 `<iframe>`，父層 shim 亦會在掛載與 `load` 時直接對其 `contentWindow` 套用 `patchWin` 剪貼簿與連結攔截。
 2. **多層上拋（不污染網址列）**：每層 shim 安裝 `message` relay listener，將子框架的 `openExternal` 與 `copy` 逐級上拋至頂層；明確不轉發 `pageNavigated`，避免子框架導航污染網址列與前進／後退堆疊。
-3. **非架構級的小邊角（視需要局部補即可）**：不處理 `srcdoc`／`about:blank` + `document.write`（避免干擾沙箱與文件寫入流程，詳見 [IFRAME-SHIM-DESIGN.md](IFRAME-SHIM-DESIGN.md)）；`SHIM_JS` 的點擊監聽沿 `e.target` 往父節點尋找 `<a>`，未穿透 Shadow DOM（真遇到時改用 `e.composedPath()` 即可）。
+3. **非架構級的小邊角（視需要局部補即可）**：`SHIM_JS` 的點擊監聽沿 `e.target` 往父節點尋找 `<a>`，未穿透 Shadow DOM（真遇到時改用 `e.composedPath()` 即可）。
 
 ## 仍然做不到的（VS Code Webview 平台硬邊界 vs 實作取捨）
 
@@ -145,4 +145,4 @@ CDN 只對站台的真實 origin 發 `Access-Control-Allow-Origin`。頁面若�
 
 ## 測試
 
-`npm test` 跑 `test/proxy-units.js`（180 項檢查）與 `test/webview-units.js`（73 項檢查）：用專案自己的 esbuild 打包 `src/proxy.ts` 再斷言，測的是出貨碼。涵蓋 `t-<12hex>.localhost` 目標隔離與 Host 防護、CSP 政策清單與 nonce 抬升、`crossorigin` 剝離、shim 注入點與多層 relay、`Sec-Fetch-Dest` 映射、SSRF 拒絕、`Next-Url`／`Referer` 映射、CookieJar、剪貼簿政策預檢與子框架權限轉授、重定向改寫與上游快取保留。
+`npm test` 跑 `test/proxy-units.js`（191 項檢查）與 `test/webview-units.js`（72 項檢查）：用專案自己的 esbuild 打包 `src/proxy.ts` 再斷言，測的是出貨碼。涵蓋 `t-<12hex>.localhost` 目標隔離與 Host 防護、CSP 政策清單（含 `script-src-elem` 與 `'strict-dynamic'` nonce 抬升／簽發）、`crossorigin` 剝離、shim 注入點與跨重啟 token 相容、HTML `no-store` 與子資源快取分離、多層 relay 與 `srcdoc` 同源子框架補丁、`Sec-Fetch-Dest` 映射、SSRF 拒絕、`Next-Url`／`Referer` 映射、CookieJar、剪貼簿直接橋接（`writeText`／`write`／`execCommand('copy')`）與重定向改寫。

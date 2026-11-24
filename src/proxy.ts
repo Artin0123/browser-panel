@@ -45,7 +45,7 @@ const HTML_INJECT_MAX_BYTES = 5 * 1024 * 1024;
 /**
  * Served at /p/<token>/__bp_shim.js and referenced from injected script tags.
  * Bridges window.open / target=_blank / target=_top(_parent) and clipboard
- * failures to the parent webview,
+ * writes to the parent webview,
  * and reports the document's real URL back to the parent (an iframe's src
  * attribute is NOT updated by in-frame navigations, so without these reports the
  * webview cannot track link clicks/redirects — breaking back/forward, the URL
@@ -70,7 +70,8 @@ const HTML_INJECT_MAX_BYTES = 5 * 1024 * 1024;
 export const SHIM_JS =
 	'(function(){' +
 	'var bp={};try{bp=JSON.parse(new URL(document.currentScript.src).searchParams.get("bp")||"{}")}catch(e){}' +
-	'function send(t,p){try{parent.postMessage(Object.assign({type:t},p),"*")}catch(e){}}' +
+	'var winParent=window.parent;' +
+	'function send(t,p){try{if(winParent&&winParent!==window)winParent.postMessage(Object.assign({type:t},p),"*")}catch(e){}}' +
 	'function openExt(u){var a=realUrl(u);if(a)send("openExternal",{url:a})}' +
 	'function hrefOf(a){' +
 	'try{var h=a.href;if(typeof h==="string"&&h)return h}catch(e){}' +
@@ -93,15 +94,15 @@ export const SHIM_JS =
 	'return x.href' +
 	'}' +
 	// Rewrites a URL into its proxied form so following it stays in the panel:
-	// panel: URLs already on the proxy origin pass through untouched, the target
-	// site's own absolute URLs become /p/<token>/<scheme>/<host>/<path> (a
-	// same-site link's absolute href would otherwise send the frame straight to
-	// the real host, where X-Frame-Options blocks framing). null = another site.
+	// URLs already on the proxy origin pass through untouched; on a per-target
+	// t-<id>.localhost origin same-site URLs map directly to root-relative paths
+	// (no token or 302 bounce needed); on loopback bootstrap URLs they use bp.prefix.
 	'function inPanel(u){' +
 	'if(!u)return null;' +
 	'try{var x=new URL(u,location.href);' +
 	'if(x.origin===location.origin)return x.href;' +
 	'if(bp.origin&&x.origin===bp.origin){' +
+	'if(/^t-[0-9a-f]{12}\\.localhost$/i.test(location.hostname))return location.origin+x.pathname+x.search+x.hash;' +
 	'if(bp.prefix)return location.origin+bp.prefix+x.protocol.slice(0,-1)+"/"+x.host+x.pathname+x.search+x.hash;' +
 	'return location.origin+x.pathname+x.search+x.hash' +
 	'}' +
@@ -119,20 +120,27 @@ export const SHIM_JS =
 	'window.addEventListener("hashchange",reportUrl);' +
 	'try{var ps=history.pushState;history.pushState=function(){var r=ps.apply(this,arguments);setTimeout(reportUrl,0);return r};}catch(e){}' +
 	'try{var rs=history.replaceState;history.replaceState=function(){var r=rs.apply(this,arguments);setTimeout(reportUrl,0);return r};}catch(e){}' +
-	'window.open=function(u){if(u)openExt(u);return null};' +
-	'document.addEventListener("click",function(e){' +
+	// Direct extension-host clipboard & popup bridge: Electron's main-process
+	// permission handler denies native clipboard writes on every non-vscode-webview
+	// origin, so writeText / write / execCommand("copy") always relay straight to
+	// vscode.env.clipboard.writeText via postMessage instead of calling the
+	// blocked native Clipboard API. Encapsulated in patchWin(w) so same-origin
+	// srcdoc / about:blank / blob: child iframes receive the same hooks.
+	'var clipCopy=function(t){send("copy",{text:String(t)})};' +
+	'var htmlToText=function(h){try{if(typeof DOMParser==="function"){var dp=new DOMParser().parseFromString(String(h),"text/html");return(dp&&dp.body&&dp.body.textContent)||""}}catch(e){}return String(h).replace(/<[^>]*>/g,"")};' +
+	'var readPart=function(it,m){return Promise.resolve(it.getType(m)).then(function(b){return typeof b==="string"?b:b.text()})};' +
+	'var writeItems=function(items){' +
+	'var arr=Array.isArray(items)?items:Array.from(items||[]);' +
+	'for(var i=0;i<arr.length;i++){var it=arr[i];if(!it||!it.types||!it.getType)continue;' +
+	'if(it.types.indexOf("text/plain")!==-1)return readPart(it,"text/plain").then(function(t){clipCopy(t)});' +
+	'if(it.types.indexOf("text/html")!==-1)return readPart(it,"text/html").then(function(h){clipCopy(htmlToText(h))})' +
+	'}return null};' +
+	'var patchDoc=function(doc){' +
+	'try{if(!doc||doc.__bpDocShimmed||!doc.addEventListener)return;Object.defineProperty(doc,"__bpDocShimmed",{value:true})}catch(e){return}' +
+	'try{doc.addEventListener("click",function(e){' +
 	'var t=e.target;while(t&&String(t.tagName).toUpperCase()!=="A")t=t.parentElement;if(!t)return;' +
 	'var g=(t.getAttribute("target")||"").toLowerCase();' +
 	'if(g==="_blank"||g==="_new"){e.preventDefault();e.stopPropagation();openExt(hrefOf(t));return}' +
-	// target=_top / _parent asks to break out of the frame. The webview iframe is
-	// sandboxed without allow-top-navigation (read out of the installed IDE's
-	// workbench.desktop.main.js: allow-scripts, allow-same-origin, allow-forms,
-	// allow-pointer-lock, allow-downloads), so the browser drops that navigation
-	// silently — the click simply looks dead. Google's One Bar "Sign in"
-	// (accounts.google.com/ServiceLogin, target=_top) on antigravity.google.com is
-	// exactly that case. Emulate the intent instead: the same site opens in the
-	// panel (the panel IS the browsing surface here), another site leaves for a
-	// real browser, where its own cookies and its own session actually work.
 	'if(g==="_top"||g==="_parent"){' +
 	'var raw=t.getAttribute("href")||"";' +
 	'if(/^(javascript|mailto|tel|data|blob|about):/i.test(raw))return;' +
@@ -141,88 +149,74 @@ export const SHIM_JS =
 	'if(p){e.preventDefault();e.stopPropagation();location.href=p}' +
 	'else if(/^https?:/i.test(u)){e.preventDefault();e.stopPropagation();openExt(u)}' +
 	'}' +
-	'},true);' +
-	// Clipboard bridge: in a VS Code webview iframe, Electron's permission check
-	// rejects non-vscode-webview origins and upstream headers or un-delegated
-	// frames may still disable clipboard-write / clipboard-read via Permissions
-	// Policy. Skip the native call when Permissions-Policy blocks the feature (a
-	// blocked native call logs a Blink [Violation] before rejecting) and relay
-	// writes to vscode.env.clipboard.writeText via postMessage.
-	'var canFeat=function(f){try{var fp=document.featurePolicy||document.permissionsPolicy;if(fp&&typeof fp.allowsFeature==="function")return !!fp.allowsFeature(f)}catch(e){}return true};' +
-	'var notAllowed=function(m){return typeof DOMException==="function"?new DOMException(m,"NotAllowedError"):Object.assign(new Error(m),{name:"NotAllowedError"})};' +
-	'var clipCopy=function(t){send("copy",{text:String(t)})};' +
-	'var writeItems=function(items){' +
-	'var arr=Array.isArray(items)?items:Array.from(items||[]);' +
-	'for(var i=0;i<arr.length;i++){var it=arr[i];' +
-	'if(it&&it.types&&it.types.indexOf("text/plain")!==-1&&it.getType){' +
-	'return Promise.resolve(it.getType("text/plain")).then(function(b){return typeof b==="string"?b:b.text()}).then(function(t){clipCopy(t)})' +
-	'}}return null};' +
-	'try{' +
-	'var clip=navigator.clipboard;' +
-	'if(clip){' +
-	'if(clip.writeText){' +
-	'var wt=clip.writeText.bind(clip);' +
-	'clip.writeText=function(text){' +
-	'if(!canFeat("clipboard-write")){clipCopy(text);return Promise.resolve()}' +
-	'try{return Promise.resolve(wt(text)).catch(function(){clipCopy(text)})}' +
-	'catch(e){clipCopy(text);return Promise.resolve()}' +
-	'}' +
-	'}else{clip.writeText=function(text){clipCopy(text);return Promise.resolve()}}' +
-	'if(clip.write){' +
-	'var wr=clip.write.bind(clip);' +
-	'clip.write=function(items){' +
-	'var fallback=function(err){' +
-	'try{var p=writeItems(items);if(p)return p}catch(e){}return Promise.reject(err)' +
+	'},true)}catch(e){}' +
 	'};' +
-	'if(!canFeat("clipboard-write"))return fallback(notAllowed("Clipboard write failed"));' +
-	'try{return Promise.resolve(wr(items)).catch(fallback)}catch(e){return fallback(e)}' +
-	'}' +
-	'}' +
-	'if(clip.readText){' +
-	'var rt=clip.readText.bind(clip);' +
-	'clip.readText=function(){if(!canFeat("clipboard-read"))return Promise.reject(notAllowed("Clipboard read failed"));return rt()}' +
-	'}' +
-	'if(clip.read){' +
-	'var rd=clip.read.bind(clip);' +
-	'clip.read=function(){if(!canFeat("clipboard-read"))return Promise.reject(notAllowed("Clipboard read failed"));return rd()}' +
-	'}' +
-	'}else{' +
-	'Object.defineProperty(navigator,"clipboard",{configurable:true,value:{' +
-	'writeText:function(text){clipCopy(text);return Promise.resolve()},' +
-	'write:function(items){' +
+	'var patchWin=function(w){' +
+	'if(!w)return;' +
+	'try{patchDoc(w.document)}catch(e){}' +
+	'try{if(w.__bpShimmed)return;Object.defineProperty(w,"__bpShimmed",{value:true})}catch(e){return}' +
+	'var notAllowed=function(m){return typeof w.DOMException==="function"?new w.DOMException(m,"NotAllowedError"):Object.assign(new Error(m),{name:"NotAllowedError"})};' +
+	'try{w.open=function(u){if(u)openExt(u);return null}}catch(e){}' +
+	'var wtFn=function(text){clipCopy(text===undefined?"":text);return Promise.resolve()};' +
+	'var wrFn=function(items){' +
 	'try{var p=writeItems(items);if(p)return p}catch(e){}' +
-	'return Promise.reject(notAllowed("Clipboard write failed"))' +
-	'},' +
+	'var types=[];try{var a=Array.isArray(items)?items:Array.from(items||[]);for(var i=0;i<a.length;i++)if(a[i]&&a[i].types)types=types.concat(Array.from(a[i].types))}catch(e){}' +
+	'try{w.console&&w.console.warn("[Browser Panel] Clipboard write supports text/plain or text/html only (got: "+(types.join(", ")||"none")+")")}catch(e){}' +
+	'return Promise.reject(notAllowed("Clipboard write supports text only"))};' +
+	'try{' +
+	'if(w.Clipboard&&w.Clipboard.prototype){try{w.Clipboard.prototype.writeText=wtFn;w.Clipboard.prototype.write=wrFn}catch(e){}}' +
+	'var clip=w.navigator&&w.navigator.clipboard;' +
+	'if(clip){try{clip.writeText=wtFn}catch(e){}try{clip.write=wrFn}catch(e){}}' +
+	'else if(w.navigator){Object.defineProperty(w.navigator,"clipboard",{configurable:true,value:{' +
+	'writeText:wtFn,write:wrFn,' +
 	'readText:function(){return Promise.reject(notAllowed("Clipboard read failed"))},' +
 	'read:function(){return Promise.reject(notAllowed("Clipboard read failed"))}' +
-	'}})' +
-	'}' +
+	'}})}' +
 	'}catch(e){}' +
-	'try{if(navigator.permissions&&navigator.permissions.query){' +
-	'var pq=navigator.permissions.query.bind(navigator.permissions);' +
-	'navigator.permissions.query=function(desc){' +
-	'var isClipWrite=desc&&desc.name==="clipboard-write";' +
-	'var grant=function(){return{state:"granted",name:"clipboard-write",onchange:null,addEventListener:function(){},removeEventListener:function(){},dispatchEvent:function(){return true}}};' +
-	'if(!isClipWrite)return pq(desc);' +
-	'if(!canFeat("clipboard-write"))return Promise.resolve(grant());' +
-	'try{return Promise.resolve(pq(desc)).then(function(st){return st&&st.state==="denied"?grant():st},function(){return grant()})}catch(e){return Promise.resolve(grant())}' +
+	'try{if(w.navigator&&w.navigator.permissions&&w.navigator.permissions.query){' +
+	'var pq=w.navigator.permissions.query.bind(w.navigator.permissions);' +
+	'w.navigator.permissions.query=function(desc){' +
+	'if(desc&&desc.name==="clipboard-write")return Promise.resolve({state:"granted",name:"clipboard-write",onchange:null,addEventListener:function(){},removeEventListener:function(){},dispatchEvent:function(){return true}});' +
+	'return pq(desc)' +
 	'}' +
 	'}}catch(e){}' +
-	'try{var ec=Document.prototype.execCommand;' +
-	'if(ec){Document.prototype.execCommand=function(cmd){' +
+	'try{' +
+	'var copying=false,capText="",capHtml="";' +
+	'var recordData=function(k,v){var lk=String(k||"").toLowerCase();if(lk==="text/plain"||lk==="text")capText=String(v);else if(lk==="text/html")capHtml=String(v)};' +
+	'if(w.DataTransfer&&w.DataTransfer.prototype&&w.DataTransfer.prototype.setData){' +
+	'var origSet=w.DataTransfer.prototype.setData;' +
+	'w.DataTransfer.prototype.setData=function(k,v){if(copying)recordData(k,v);return origSet.apply(this,arguments)}' +
+	'}' +
+	'var ec=w.Document&&w.Document.prototype&&w.Document.prototype.execCommand;' +
+	'if(ec){w.Document.prototype.execCommand=function(cmd){' +
+	'if(String(cmd||"").toLowerCase()!=="copy")return ec.apply(this,arguments);' +
+	'copying=true;capText="";capHtml="";var fired=false;' +
+	'var onCopy=function(){fired=true};' +
+	'try{if(this.addEventListener)this.addEventListener("copy",onCopy,true)}catch(e){}' +
 	'var ok=false;try{ok=ec.apply(this,arguments)}catch(e){ok=false}' +
-	'if(!ok&&String(cmd).toLowerCase()==="copy"){' +
-	'var txt="";try{' +
-	'var ae=document.activeElement;' +
+	'try{if(this.removeEventListener)this.removeEventListener("copy",onCopy,true)}catch(e){}' +
+	'if(!fired&&typeof w.Event==="function"){' +
+	'try{var ev=new w.Event("copy",{bubbles:true,cancelable:true});' +
+	'Object.defineProperty(ev,"clipboardData",{value:{setData:recordData,getData:function(){return capText},clearData:function(){capText="";capHtml=""}}});' +
+	'var sel=w.getSelection?w.getSelection():null,sn=sel&&sel.rangeCount&&!sel.isCollapsed?sel.anchorNode:null;' +
+	'if(sn&&sn.nodeType!==1)sn=sn.parentElement;' +
+	'var tgt=sn||this.activeElement||this.body||this;if(tgt&&tgt.dispatchEvent)tgt.dispatchEvent(ev)}catch(e){}' +
+	'}' +
+	'copying=false;' +
+	'var txt=capText||(capHtml?htmlToText(capHtml):"");' +
+	'if(!txt){try{' +
+	'var ae=this.activeElement;' +
 	'if(ae&&(ae.tagName==="TEXTAREA"||ae.tagName==="INPUT")&&typeof ae.selectionStart==="number"&&typeof ae.selectionEnd==="number"){' +
 	'txt=ae.value.slice(ae.selectionStart,ae.selectionEnd)' +
 	'}' +
-	'if(!txt&&window.getSelection)txt=String(window.getSelection()||"")' +
-	'}catch(e){}' +
+	'if(!txt&&w.getSelection)txt=String(w.getSelection()||"")' +
+	'}catch(e){}}' +
 	'if(txt){clipCopy(txt);return true}' +
-	'}return ok' +
+	'return ok' +
 	'}}' +
 	'}catch(e){}' +
+	'};' +
+	'patchWin(window);' +
 	// Drop cross-origin mode from scripts/links the page creates: the CDN grants
 	// CORS to the site's real origin, never to the proxy origin, so a CORS-mode
 	// load fails with ERR_FAILED 200 (OK). Classic/no-cors needs no grant.
@@ -239,51 +233,41 @@ export const SHIM_JS =
 	'if(d&&d.set)Object.defineProperty(c.prototype,"crossOrigin",{configurable:true,enumerable:d.enumerable,get:d.get,set:function(v){if(keepCors(this))return d.set.call(this,v)}})' +
 	'});' +
 	'}catch(e){}' +
-	// Child iframe coverage: rewrite child iframe src so nested frames (both
-	// same-origin and cross-origin) load through their per-target proxy origin,
-	// delegate clipboard-read / clipboard-write across the per-target origin
-	// boundary, receive this shim, and relay openExternal/copy upward (never
-	// pageNavigated, so child frames cannot pollute the URL bar/history).
-	'var mergeAllow=function(raw){' +
-	'var parts=String(raw||"").split(";"),out=[],hr=false,hw=false;' +
-	'for(var i=0;i<parts.length;i++){var d=parts[i].trim();if(!d)continue;' +
-	'if(/^clipboard-read(\\s|$)/i.test(d)){hr=true;out.push(/(?:^|\\s)(?:\'none\'|\\*)(?:\\s|$)/i.test(d)?d:"clipboard-read *");continue}' +
-	'if(/^clipboard-write(\\s|$)/i.test(d)){hw=true;out.push(/(?:^|\\s)(?:\'none\'|\\*)(?:\\s|$)/i.test(d)?d:"clipboard-write *");continue}' +
-	'out.push(d)}' +
-	'if(!hr)out.push("clipboard-read *");' +
-	'if(!hw)out.push("clipboard-write *");' +
-	'return out.join("; ")' +
+	// Child iframe coverage: rewrite http(s) child iframe src through the proxy,
+	// patch same-origin srcdoc / about:blank / blob: frames directly via patchWin,
+	// and relay openExternal/copy upward (never pageNavigated).
+	'var hookLocalFrame=function(el){' +
+	'if(!el)return;' +
+	'try{if(el.contentWindow)patchWin(el.contentWindow)}catch(e){}' +
+	'try{if(!el.__bpLoadHook&&el.addEventListener){Object.defineProperty(el,"__bpLoadHook",{value:true});' +
+	'el.addEventListener("load",function(){try{if(el.contentWindow)patchWin(el.contentWindow)}catch(e){}})' +
+	'}}catch(e){}' +
 	'};' +
-	'var ensureIfAllow=function(el){' +
-	'try{' +
-	'if(!el||String(el.tagName||"IFRAME").toUpperCase()!=="IFRAME"||!el.getAttribute)return;' +
-	'var cur=el.getAttribute("allow"),next=mergeAllow(cur);' +
-	'if(cur!==next){if(sa)sa.call(el,"allow",next);else if(el.setAttribute)el.setAttribute("allow",next)}' +
-	'}catch(e){}' +
-	'};' +
-	// Tri-state: undefined = non-http(s) / invalid (touch neither allow nor src);
-	// null = already root-relative or proxied (delegate allow, keep src);
-	// string = rewritten src (delegate allow and update src).
 	'var rewriteIfSrc=function(u){' +
-	'if(!u||typeof u!=="string")return;' +
+	'if(!u||typeof u!=="string")return null;' +
 	'var s=u.trim();' +
-	'if(!s||/^(about|javascript|data|blob|mailto|tel):/i.test(s))return;' +
+	'if(!s||/^(about|javascript|data|blob|mailto|tel):/i.test(s))return null;' +
 	'if(s.charAt(0)==="/"&&s.charAt(1)!=="/")return null;' +
 	'if(bp.prefix&&s.lastIndexOf(bp.prefix,0)===0)return null;' +
 	'try{var x=new URL(s,document.baseURI||location.href);' +
-	'if(x.protocol!=="http:"&&x.protocol!=="https:")return;' +
+	'if(x.protocol!=="http:"&&x.protocol!=="https:")return null;' +
 	'if(x.origin===location.origin||(x.port===location.port&&/^t-[0-9a-f]{12}\\.localhost$/i.test(x.hostname)))return null;' +
 	'if(bp.origin&&x.origin===bp.origin)return x.pathname+x.search+x.hash;' +
-	'if(bp.prefix)return location.origin+bp.prefix+x.protocol.slice(0,-1)+"/"+x.host+x.pathname+x.search+x.hash;' +
-	'return null' +
+	'if(bp.prefix)return location.origin+bp.prefix+x.protocol.slice(0,-1)+"/"+x.host+x.pathname+x.search+x.hash' +
 	'}catch(e){}' +
+	'return null' +
+	'};' +
+	'var isLocalFrame=function(el,raw){' +
+	'if(el.hasAttribute&&el.hasAttribute("srcdoc"))return true;' +
+	'var s=String(raw||"").trim();' +
+	'return !s||/^about:blank(\\?|#|$)/i.test(s)||/^blob:/i.test(s)' +
 	'};' +
 	'var sweepIframe=function(el){' +
 	'if(!el||!el.getAttribute)return;' +
-	'var r=rewriteIfSrc(el.getAttribute("src"));' +
-	'if(r===undefined)return;' +
-	'ensureIfAllow(el);' +
-	'if(typeof r==="string"&&el.getAttribute("src")!==r){if(sa)sa.call(el,"src",r);else el.setAttribute("src",r)}' +
+	'var raw=el.getAttribute("src");' +
+	'if(isLocalFrame(el,raw)){hookLocalFrame(el);return}' +
+	'var r=rewriteIfSrc(raw);' +
+	'if(r&&raw!==r){if(sa)sa.call(el,"src",r);else el.setAttribute("src",r)}' +
 	'};' +
 	'try{' +
 	'var ifs=document.querySelectorAll?document.querySelectorAll("iframe,frame"):[];' +
@@ -297,25 +281,24 @@ export const SHIM_JS =
 	'if(n.tagName==="IFRAME"||n.tagName==="FRAME")sweepIframe(n);' +
 	'if(n.querySelectorAll){var sub=n.querySelectorAll("iframe,frame");for(var k=0;k<sub.length;k++)sweepIframe(sub[k])}' +
 	'}}' +
-	'}).observe(document.documentElement||document,{childList:true,subtree:true,attributes:true,attributeFilter:["src"]})' +
+	'}).observe(document.documentElement||document,{childList:true,subtree:true,attributes:true,attributeFilter:["src","srcdoc"]})' +
 	'}' +
 	'["HTMLIFrameElement","HTMLFrameElement"].forEach(function(n){' +
 	'var c=window[n];if(!c||!c.prototype)return;' +
 	'var d=Object.getOwnPropertyDescriptor(c.prototype,"src");' +
 	'if(d&&d.set)Object.defineProperty(c.prototype,"src",{configurable:true,enumerable:d.enumerable,get:d.get,' +
-	'set:function(v){var r=rewriteIfSrc(v);if(r!==undefined&&n==="HTMLIFrameElement")ensureIfAllow(this);return d.set.call(this,typeof r==="string"?r:v)}});' +
-	'if(n==="HTMLIFrameElement"){' +
-	'var da=Object.getOwnPropertyDescriptor(c.prototype,"allow");' +
-	'if(da&&da.set)Object.defineProperty(c.prototype,"allow",{configurable:true,enumerable:da.enumerable,get:da.get,set:function(v){return da.set.call(this,mergeAllow(v))}})' +
-	'}' +
+	'set:function(v){var r=rewriteIfSrc(v);if(!r&&isLocalFrame(this,v))hookLocalFrame(this);return d.set.call(this,r||v)}});' +
+	'var sd=Object.getOwnPropertyDescriptor(c.prototype,"srcdoc");' +
+	'if(sd&&sd.set)Object.defineProperty(c.prototype,"srcdoc",{configurable:true,enumerable:sd.enumerable,get:sd.get,' +
+	'set:function(v){hookLocalFrame(this);return sd.set.call(this,v)}})' +
 	'});' +
 	'if(sa){Element.prototype.setAttribute=function(n,v){' +
-	'var tag=this&&this.tagName;' +
+	'var tag=this&&this.tagName?String(this.tagName).toUpperCase():"";' +
 	'if(tag==="SCRIPT"||tag==="LINK"){if(String(n).toLowerCase()==="crossorigin"&&!keepCors(this))return}' +
-	'else if(tag==="IFRAME"){' +
+	'else if(tag==="IFRAME"||tag==="FRAME"){' +
 	'var ln=String(n).toLowerCase();' +
-	'if(ln==="src"){var sv=String(v),r=rewriteIfSrc(sv);if(r!==undefined)ensureIfAllow(this);if(typeof r==="string")return sa.call(this,n,r)}' +
-	'else if(ln==="allow"){return sa.call(this,n,mergeAllow(v))}' +
+	'if(ln==="src"){var sv=String(v),r=rewriteIfSrc(sv);if(!r&&isLocalFrame(this,sv))hookLocalFrame(this);if(r)return sa.call(this,n,r)}' +
+	'else if(ln==="srcdoc"){hookLocalFrame(this)}' +
 	'}' +
 	'return sa.apply(this,arguments)' +
 	'}}' +
@@ -638,6 +621,20 @@ export class FrameProxy {
 		headers['accept-encoding'] = ACCEPT_ENCODING;
 		this._rewriteOrigin(headers, target);
 		this._rewriteSecFetchDest(headers);
+		// Prevent 304 Not Modified on HTML navigations from reusing pre-update or
+		// stale-token cached HTML shells (JS/CSS/image subresources keep ETag/304).
+		const rawDest = String(req.headers['sec-fetch-dest'] || '').trim().toLowerCase();
+		const rawMode = String(req.headers['sec-fetch-mode'] || '').trim().toLowerCase();
+		if (
+			/\btext\/html\b/i.test(String(headers.accept || '')) ||
+			rawMode === 'navigate' ||
+			rawDest === 'document' ||
+			rawDest === 'iframe' ||
+			rawDest === 'frame'
+		) {
+			delete headers['if-none-match'];
+			delete headers['if-modified-since'];
+		}
 		// Next.js (and similar) send the current page URL in Next-Url; it must be
 		// the target path, not /p/<token>/..., or the router disagrees with itself.
 		const nextUrl = headers['next-url'];
@@ -928,59 +925,76 @@ export class FrameProxy {
 	 * entirely: popups stop being intercepted, URL tracking stops, and the
 	 * cross-origin fix in the shim never runs. Rules (verified against
 	 * Chromium):
-	 * - Within ONE policy only the FIRST script-src (else the first default-src,
-	 *   which governs scripts when script-src is absent) counts; later repeats
-	 *   are ignored. Each policy is handled on its own, because all of them are
-	 *   enforced and our script must satisfy every one.
-	 * - A policy that already allows 'self', or that restricts neither directive,
-	 *   needs no change. 'self' is the document's own origin, which behind the
-	 *   proxy IS the proxy origin the shim is served from; loosening to
-	 *   same-origin adds no attacker power, since same-origin script content
-	 *   comes from the same target server that already controls the page body.
+	 * - Within ONE policy only the FIRST script-src-elem (else the first
+	 *   script-src, else the first default-src) governs external <script src>;
+	 *   later repeats are ignored. Each policy is handled on its own, because all
+	 *   of them are enforced and our script must satisfy every one.
+	 * - A policy that already allows 'self' WITHOUT 'strict-dynamic', or that
+	 *   restricts none of those directives, needs no change ('strict-dynamic'
+	 *   causes browsers to ignore host sources like 'self').
 	 * - A closed policy with a nonce is left untouched and the nonce is reused on
-	 *   the shim tag (works under 'strict-dynamic' too). A single tag holds a
-	 *   single nonce, so this is only possible when every closed policy shares
-	 *   the same nonce; otherwise every closed policy gets 'self' appended
-	 *   instead (a host source is what authorizes EXTERNAL scripts; hash sources
-	 *   only match inline content, and Chromium ignores 'none' when combined).
+	 *   the shim tag when every closed policy shares that nonce; if 'strict-dynamic'
+	 *   is present without a shared nonce (e.g. hash + 'strict-dynamic'), a fresh
+	 *   random nonce is minted onto both the directive and the shim tag; otherwise
+	 *   closed policies get 'self' appended.
 	 * - Appending goes to the directive that is already there — never a new
-	 *   script-src when only default-src exists, as that would override
-	 *   default-src and drop e.g. its 'unsafe-inline' for the page's own scripts.
+	 *   script-src / script-src-elem when only default-src exists, as that would
+	 *   override default-src and drop e.g. its 'unsafe-inline' for inline scripts.
 	 */
 	private _cspForShim(policies: string[]): { policies: string[]; nonce: string } {
 		const isSelf = (v: string): boolean => /^'self'$/i.test(v);
+		const isStrictDynamic = (v: string): boolean => /^'strict-dynamic'$/i.test(v);
+		const allowsShim = (values: string[]): boolean => values.some(isSelf) && !values.some(isStrictDynamic);
 		const nonceOf = (values: string[]): string => {
 			const tok = values.find((v) => /^'nonce-[^']+'$/i.test(v));
 			return tok ? tok.slice(7, -1).replace(/[^A-Za-z0-9+/=_-]/g, '') : '';
 		};
 		const parsed = policies.map((policy) => {
 			const directives = policy.split(';').map((d) => d.trim()).filter((d) => d.length > 0);
+			const elemIdx = directives.findIndex((d) => /^script-src-elem(\s|$)/i.test(d));
 			const scriptIdx = directives.findIndex((d) => /^script-src(\s|$)/i.test(d));
 			const target =
-				scriptIdx !== -1 ? scriptIdx : directives.findIndex((d) => /^default-src(\s|$)/i.test(d));
+				elemIdx !== -1
+					? elemIdx
+					: scriptIdx !== -1
+						? scriptIdx
+						: directives.findIndex((d) => /^default-src(\s|$)/i.test(d));
 			return { directives, target };
 		});
-		// Policies that would reject the shim as things stand.
+		// Policies that would reject the shim as things stand ('self' alone does
+		// not help when 'strict-dynamic' is also present, as browsers ignore host
+		// sources under 'strict-dynamic').
 		const closed = parsed.filter(
-			(p) => p.target !== -1 && !p.directives[p.target].split(/\s+/).some(isSelf)
+			(p) => p.target !== -1 && !allowsShim(p.directives[p.target].split(/\s+/))
 		);
 		const nonces = new Set(closed.map((p) => nonceOf(p.directives[p.target].split(/\s+/))));
 		const sharedNonce = nonces.size === 1 && !nonces.has('') ? [...nonces][0] : '';
+		const needsMintedNonce =
+			!sharedNonce &&
+			closed.some((p) => p.directives[p.target].split(/\s+/).some(isStrictDynamic));
+		const mintedNonce = needsMintedNonce ? crypto.randomBytes(12).toString('base64') : '';
+		const tagNonce = sharedNonce || mintedNonce;
 		const out = parsed.map((p) => {
 			if (p.target === -1) {
 				return p.directives.join('; '); // this policy restricts nothing relevant
 			}
 			const values = p.directives[p.target].split(/\s+/);
-			if (values.some(isSelf)) {
+			if (allowsShim(values)) {
 				return p.directives.join('; ');
 			}
 			if (sharedNonce && nonceOf(values) === sharedNonce) {
-				return p.directives.join('; '); // satisfied by the nonce on the tag
+				return p.directives.join('; '); // satisfied by the shared nonce on the tag
 			}
-			p.directives[p.target] += " 'self'";
+			if (values.some(isStrictDynamic)) {
+				p.directives[p.target] += " 'nonce-" + mintedNonce + "'";
+				return p.directives.join('; ');
+			}
+			if (!values.some(isSelf)) {
+				p.directives[p.target] += " 'self'";
+			}
 			return p.directives.join('; ');
 		});
-		return { policies: out, nonce: sharedNonce };
+		return { policies: out, nonce: tagNonce };
 	}
 
 	/** Shim script URL carrying the per-document target mapping in ?bp=. */
@@ -993,47 +1007,10 @@ export class FrameProxy {
 		return this._shimPath + '?bp=' + encodeURIComponent(raw);
 	}
 
-	private static _mergeIframeAllow(raw: string | null | undefined): string {
-		const parts = String(raw ?? '')
-			.split(';')
-			.map((d) => d.trim())
-			.filter((d) => d.length > 0);
-		let hasRead = false;
-		let hasWrite = false;
-		const out = parts.map((d) => {
-			if (/^clipboard-read(\s|$)/i.test(d)) {
-				hasRead = true;
-				return /(?:^|\s)(?:'none'|\*)(?:\s|$)/i.test(d) ? d : 'clipboard-read *';
-			}
-			if (/^clipboard-write(\s|$)/i.test(d)) {
-				hasWrite = true;
-				return /(?:^|\s)(?:'none'|\*)(?:\s|$)/i.test(d) ? d : 'clipboard-write *';
-			}
-			return d;
-		});
-		if (!hasRead) out.push('clipboard-read *');
-		if (!hasWrite) out.push('clipboard-write *');
-		return out.join('; ');
-	}
-
-	private static _ensureIframeAllowAttr(tag: string): string {
-		const allowRe = /(\sallow)(?:\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s>"']+)))?(?=[\s/>])/i;
-		if (allowRe.test(tag)) {
-			return tag.replace(allowRe, (_full, attrName, dq, sq, uq) => {
-				const merged = FrameProxy._mergeIframeAllow(dq ?? sq ?? uq ?? '');
-				const quote = dq !== undefined ? '"' : sq !== undefined ? "'" : '"';
-				return attrName + '=' + quote + merged + quote;
-			});
-		}
-		return tag.replace(/(\s*\/?>)$/, ' allow="clipboard-read *; clipboard-write *"$1');
-	}
-
 	/**
 	 * Rewrite child <iframe src> values (same-origin to root-relative,
 	 * cross-origin http(s) to their own pre-registered t-<id>.localhost:<port>
-	 * origin) and delegate clipboard-read / clipboard-write with '*' so nested
-	 * frames also load through the proxy, receive the shim, and keep clipboard
-	 * Permissions-Policy across per-target origins and 302 bounces.
+	 * origin) so nested frames also load through the proxy and receive the shim.
 	 */
 	private _rewriteIframeSrcs(html: string, target: ProxyTarget): string {
 		if (!/<iframe\b/i.test(html)) {
@@ -1041,23 +1018,22 @@ export class FrameProxy {
 		}
 		const targetOrigin = this._targetOrigin(target);
 		const prefix = '/p/' + this._token + '/';
-		return html.replace(/<iframe\b[^>]*>/gi, (tag) => {
-			let shouldDelegateAllow = false;
-			const updated = tag.replace(
+		return html.replace(/<iframe\b[^>]*>/gi, (tag) =>
+			tag.replace(
 				/(\ssrc\s*=\s*)(?:"([^"]*)"|'([^']*)'|([^\s>]+))/i,
 				(full, attrPrefix, dq, sq, uq) => {
 					const raw = String(dq ?? sq ?? uq ?? '').trim();
-					if (!raw || /^(about|javascript|data|blob|mailto|tel):/i.test(raw)) {
-						return full;
-					}
-					if ((raw.startsWith('/') && !raw.startsWith('//')) || raw.startsWith(prefix)) {
-						shouldDelegateAllow = true;
+					if (
+						!raw ||
+						(raw.startsWith('/') && !raw.startsWith('//')) ||
+						raw.startsWith(prefix) ||
+						/^(about|javascript|data|blob|mailto|tel):/i.test(raw)
+					) {
 						return full;
 					}
 					try {
 						const u = new URL(raw, target.url);
 						if (u.protocol === 'http:' || u.protocol === 'https:') {
-							shouldDelegateAllow = true;
 							const rewritten =
 								u.origin === targetOrigin
 									? u.pathname + u.search + u.hash
@@ -1070,9 +1046,8 @@ export class FrameProxy {
 					}
 					return full;
 				}
-			);
-			return shouldDelegateAllow ? FrameProxy._ensureIframeAllowAttr(updated) : updated;
-		});
+			)
+		);
 	}
 
 	/**
@@ -1225,6 +1200,10 @@ export class FrameProxy {
 				}
 				delete outHeaders['content-encoding'];
 				delete outHeaders['content-length'];
+				delete outHeaders['etag'];
+				delete outHeaders['last-modified'];
+				delete outHeaders['expires'];
+				outHeaders['cache-control'] = 'no-store';
 				outHeaders['content-length'] = buf.length;
 				res.writeHead(status, outHeaders);
 				res.end(buf);
@@ -1244,8 +1223,18 @@ export class FrameProxy {
 			return;
 		}
 		const reqUrl = req.url || '';
+		const reqPath = reqUrl.split('?')[0];
 		// Same-origin shim for proxied pages (CSP script-src 'self' friendly).
-		if (reqUrl.split('?')[0] === this._shimPath) {
+		// On loopback (127.0.0.1 / localhost), require the exact per-session token;
+		// on an already-registered t-<id>.localhost target origin, also accept stale
+		// /p/<old_token>/__bp_shim.js paths so HTML cached before an editor restart
+		// or extension update still loads the shim without ever exposing this._token.
+		const isExactShim = reqPath === this._shimPath;
+		const isRegisteredStaleShim =
+			!isExactShim &&
+			this._hostTargetId(req.headers.host) !== null &&
+			/^\/p\/[0-9a-z_-]+\/__bp_shim\.js$/i.test(reqPath);
+		if (isExactShim || isRegisteredStaleShim) {
 			res.writeHead(200, {
 				'content-type': 'application/javascript; charset=utf-8',
 				'cache-control': 'no-store',

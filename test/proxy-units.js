@@ -113,116 +113,98 @@ for (const hook of ['openExt', 'hrefOf', 'realUrl', 'inPanel', 'crossOrigin', 'p
 }
 ok('SHIM_JS reads its own ?bp= mapping', SHIM_JS.includes('document.currentScript'));
 
-// Execute SHIM_JS in a minimal mocked browser context to verify clipboard fallbacks.
+// Execute SHIM_JS in a minimal mocked browser context to verify direct clipboard relays.
 {
 	const posted = [];
+	const warnings = [];
+	let nativeClipCalls = 0;
+	function Clipboard() {}
+	Clipboard.prototype.writeText = () => { nativeClipCalls++; return Promise.reject(new Error('native blocked')); };
+	Clipboard.prototype.write = () => { nativeClipCalls++; return Promise.reject(new Error('native blocked')); };
 	function Document() {}
 	Document.prototype.execCommand = () => false;
 	const doc = new Document();
 	doc.currentScript = { src: 'http://127.0.0.1:4599/p/' + TOKEN + '/__bp_shim.js?bp=' + encodeURIComponent(JSON.stringify({ origin: 'https://site.test', prefix: '/p/' + TOKEN + '/' })) };
 	doc.addEventListener = () => {};
+	doc.removeEventListener = () => {};
 	doc.activeElement = { tagName: 'TEXTAREA', value: 'copied-via-exec', selectionStart: 0, selectionEnd: 15 };
 
+	const clipInstance = new Clipboard();
 	const ctx = {
 		URL,
+		Event,
+		Clipboard,
 		Document,
+		console: { warn: (...a) => warnings.push(a.join(' ')) },
 		document: doc,
 		location: { href: 'http://127.0.0.1:4599/', origin: 'http://127.0.0.1:4599', pathname: '/', search: '', hash: '' },
 		history: { pushState() {}, replaceState() {} },
 		parent: { postMessage(m) { posted.push(m); } },
 		navigator: {
-			clipboard: {
-				writeText: () => Promise.reject(new Error('NotAllowedError')),
-				write: () => Promise.reject(new Error('NotAllowedError')),
-			},
+			clipboard: clipInstance,
 			permissions: {
-				query: (d) => Promise.resolve({ state: d.name === 'clipboard-write' ? 'denied' : 'prompt' }),
+				query: (d) => {
+					if (d.name === 'clipboard-write') nativeClipCalls++;
+					return Promise.resolve({ state: d.name === 'clipboard-write' ? 'denied' : 'prompt' });
+				},
 			},
 		},
 		addEventListener: () => {},
 		setTimeout,
-		getSelection: () => '',
+		getSelection: () => null,
 	};
 	ctx.window = ctx;
 	vm.runInNewContext(SHIM_JS, ctx);
 
-	// 1. execCommand('copy') fallback
+	// 1. execCommand('copy') fallback (textarea selection + custom copy listener setData)
 	const execOk = doc.execCommand('copy');
 	eq('SHIM_JS execCommand("copy") returns true on fallback', execOk, true);
 	ok('SHIM_JS execCommand("copy") relays selected textarea text',
 		posted.some((m) => m.type === 'copy' && m.text === 'copied-via-exec'), posted);
 
-	// 2. writeText, write(ClipboardItem), permissions.query + Permissions-Policy precheck
-	let nativeCallsWhenBlocked = 0;
-	const blockedPosted = [];
-	{
-		function BlockedDoc() {}
-		const bdoc = new BlockedDoc();
-		bdoc.currentScript = doc.currentScript;
-		bdoc.addEventListener = () => {};
-		bdoc.featurePolicy = { allowsFeature: () => false };
-		const bctx = {
-			URL,
-			Document: BlockedDoc,
-			document: bdoc,
-			location: ctx.location,
-			history: ctx.history,
-			parent: { postMessage(m) { blockedPosted.push(m); } },
-			navigator: {
-				clipboard: {
-					writeText: () => { nativeCallsWhenBlocked++; return Promise.reject(new Error('violation')); },
-					write: () => { nativeCallsWhenBlocked++; return Promise.reject(new Error('violation')); },
-					readText: () => { nativeCallsWhenBlocked++; return Promise.resolve('leak'); },
-					read: () => { nativeCallsWhenBlocked++; return Promise.resolve([]); },
-				},
-				permissions: {
-					query: (d) => {
-						if (d.name === 'clipboard-write') nativeCallsWhenBlocked++;
-						return Promise.resolve({ state: 'denied' });
-					},
-				},
-			},
-			addEventListener: () => {},
-			setTimeout,
-		};
-		bctx.window = bctx;
-		vm.runInNewContext(SHIM_JS, bctx);
-		globalThis.__blockedClipChecks = Promise.all([
-			bctx.navigator.clipboard.writeText('no-violation-wt'),
-			bctx.navigator.clipboard.write([{
-				types: ['text/plain'],
-				getType: () => Promise.resolve({ text: () => Promise.resolve('no-violation-wr') }),
-			}]),
-			bctx.navigator.permissions.query({ name: 'clipboard-write' }),
-			bctx.navigator.clipboard.readText().then(() => 'resolved', (e) => e.name),
-			bctx.navigator.clipboard.read().then(() => 'resolved', (e) => e.name),
-		]).then(([, , bcw, rtErr, rdErr]) => {
-			eq('SHIM_JS skips native clipboard calls when Permissions-Policy blocks feature', nativeCallsWhenBlocked, 0);
-			ok('SHIM_JS still relays writeText when Permissions-Policy blocks feature',
-				blockedPosted.some((m) => m.type === 'copy' && m.text === 'no-violation-wt'));
-			ok('SHIM_JS still relays write(ClipboardItem) when Permissions-Policy blocks feature',
-				blockedPosted.some((m) => m.type === 'copy' && m.text === 'no-violation-wr'));
-			eq('SHIM_JS grants clipboard-write query without native call when policy blocks', bcw.state, 'granted');
-			eq('SHIM_JS readText rejects with NotAllowedError without native call when policy blocks', rtErr, 'NotAllowedError');
-			eq('SHIM_JS read rejects with NotAllowedError without native call when policy blocks', rdErr, 'NotAllowedError');
-		});
-	}
+	const customSpan = new EventTarget();
+	customSpan.nodeType = 1;
+	customSpan.addEventListener('copy', (ev) => {
+		ev.clipboardData.setData('text/plain', 'from-copy-to-clipboard-lib');
+		ev.preventDefault();
+	});
+	ctx.getSelection = () => ({ rangeCount: 1, isCollapsed: false, anchorNode: customSpan, toString: () => 'DUMMY_MARK' });
+	eq('SHIM_JS execCommand("copy") triggers custom copy listener and returns true', doc.execCommand('copy'), true);
+	ok('SHIM_JS execCommand("copy") captures clipboardData.setData instead of dummy selection',
+		posted.some((m) => m.type === 'copy' && m.text === 'from-copy-to-clipboard-lib'), posted);
 
+	// 2. Direct writeText, Clipboard.prototype.writeText, write(text/plain & text/html & unsupported image/png), permissions.query
 	globalThis.__shimChecks = Promise.all([
-		globalThis.__blockedClipChecks,
 		ctx.navigator.clipboard.writeText('hello-wt'),
+		ctx.Clipboard.prototype.writeText.call(ctx.navigator.clipboard, 'hello-proto-wt'),
 		ctx.navigator.clipboard.write([{
 			types: ['text/plain'],
 			getType: () => Promise.resolve({ text: () => Promise.resolve('hello-wr') }),
 		}]),
+		ctx.navigator.clipboard.write([{
+			types: ['text/html'],
+			getType: () => Promise.resolve('<b>hello-html</b>'),
+		}]),
+		ctx.navigator.clipboard.write([{
+			types: ['image/png'],
+			getType: () => Promise.resolve(new Uint8Array([1, 2, 3])),
+		}]).then(() => 'resolved', (e) => e.name),
 		ctx.navigator.permissions.query({ name: 'clipboard-write' }),
 		ctx.navigator.permissions.query({ name: 'geolocation' }),
-	]).then(([, , , cw, geo]) => {
-		ok('SHIM_JS writeText fallback relays copy',
+	]).then(([, , , , pngErr, cw, geo]) => {
+		eq('SHIM_JS never calls blocked native clipboard write/query APIs', nativeClipCalls, 0);
+		ok('SHIM_JS writeText directly relays copy',
 			posted.some((m) => m.type === 'copy' && m.text === 'hello-wt'));
-		ok('SHIM_JS write(ClipboardItem) fallback relays text/plain',
+		ok('SHIM_JS Clipboard.prototype.writeText directly relays copy',
+			posted.some((m) => m.type === 'copy' && m.text === 'hello-proto-wt'));
+		ok('SHIM_JS write(ClipboardItem text/plain) relays text',
 			posted.some((m) => m.type === 'copy' && m.text === 'hello-wr'));
-		eq('SHIM_JS permissions.query("clipboard-write") grants when denied', cw.state, 'granted');
+		ok('SHIM_JS write(ClipboardItem text/html) extracts and relays plain text',
+			posted.some((m) => m.type === 'copy' && m.text === 'hello-html'));
+		eq('SHIM_JS rejects binary-only ClipboardItem with NotAllowedError', pngErr, 'NotAllowedError');
+		ok('SHIM_JS logs console warning for unsupported non-text ClipboardItem',
+			warnings.some((w) => w.includes('image/png')), warnings);
+		eq('SHIM_JS permissions.query("clipboard-write") grants directly', cw.state, 'granted');
 		eq('SHIM_JS permissions.query leaves other permissions untouched', geo.state, 'prompt');
 	});
 }
@@ -411,6 +393,32 @@ eq('_cspForShim reuses a nonce that only one policy needs', p._cspForShim([
 	"script-src 'nonce-AAA'",
 	"script-src 'self'",
 ]), { policies: ["script-src 'nonce-AAA'", "script-src 'self'"], nonce: 'AAA' });
+eq("_cspForShim lifts nonce even when 'self' coexists with 'strict-dynamic'",
+	p._cspForShim(["script-src 'self' 'nonce-SD1' 'strict-dynamic'"]),
+	{ policies: ["script-src 'self' 'nonce-SD1' 'strict-dynamic'"], nonce: 'SD1' });
+eq('_cspForShim prioritizes script-src-elem over script-src and default-src',
+	p._cspForShim(["default-src 'self'; script-src 'self'; script-src-elem 'nonce-ELEM1'"]),
+	{ policies: ["default-src 'self'; script-src 'self'; script-src-elem 'nonce-ELEM1'"], nonce: 'ELEM1' });
+{
+	const minted = p._cspForShim(["script-src 'sha256-abc=' 'strict-dynamic'"]);
+	ok("_cspForShim mints a nonce when 'strict-dynamic' has only hashes",
+		minted.nonce.length > 0 && minted.policies[0] === `script-src 'sha256-abc=' 'strict-dynamic' 'nonce-${minted.nonce}'`,
+		minted);
+}
+{
+	const htmlOut = p._outgoingHeaders(fakeReq({
+		accept: 'text/html,application/xhtml+xml',
+		'if-none-match': '"v1"',
+		'if-modified-since': 'Wed, 21 Oct 2026 07:28:00 GMT',
+	}), TARGET);
+	eq('_outgoingHeaders strips If-None-Match on HTML navigation requests', 'if-none-match' in htmlOut, false);
+	eq('_outgoingHeaders strips If-Modified-Since on HTML navigation requests', 'if-modified-since' in htmlOut, false);
+	const assetOut = p._outgoingHeaders(fakeReq({
+		accept: '*/*',
+		'if-none-match': '"asset-v1"',
+	}), TARGET);
+	eq('_outgoingHeaders preserves If-None-Match on subresource requests', assetOut['if-none-match'], '"asset-v1"');
+}
 
 // ---------------------------------------------------------------------------
 // crossorigin stripping (CORS-mode CDN loads fail behind the proxy).
@@ -628,29 +636,19 @@ eq('pathMatch /foo vs /foo is true', pathMatch('/foo', '/foo'), true);
 	const IR_TOK = TOKEN;
 
 	// _rewriteIframeSrcs cases
-	eq('_rewriteIframeSrcs rewrites same-origin double-quoted src and delegates clipboard allow',
+	eq('_rewriteIframeSrcs rewrites same-origin double-quoted src',
 		irp._rewriteIframeSrcs('<iframe src="https://site.test/sub/a?x=1#h"></iframe>', TARGET),
-		'<iframe src="/sub/a?x=1#h" allow="clipboard-read *; clipboard-write *"></iframe>');
+		'<iframe src="/sub/a?x=1#h"></iframe>');
 	eq('_rewriteIframeSrcs rewrites same-origin single-quoted src',
 		irp._rewriteIframeSrcs("<IFRAME id='f' SRC='https://site.test/b'></IFRAME>", TARGET),
-		"<IFRAME id='f' SRC='/b' allow=\"clipboard-read *; clipboard-write *\"></IFRAME>");
+		"<IFRAME id='f' SRC='/b'></IFRAME>");
 	eq('_rewriteIframeSrcs rewrites same-origin unquoted src',
 		irp._rewriteIframeSrcs('<iframe src=https://site.test/c></iframe>', TARGET),
-		'<iframe src="/c" allow="clipboard-read *; clipboard-write *"></iframe>');
-	eq('_rewriteIframeSrcs rewrites cross-origin iframe to per-target origin with wildcard clipboard allow',
+		'<iframe src="/c"></iframe>');
+	eq('_rewriteIframeSrcs rewrites cross-origin iframe to per-target origin',
 		irp._rewriteIframeSrcs('<iframe src="https://accounts.google.com/o/oauth2"></iframe>', TARGET),
-		`<iframe src="${irp._registerTarget(new URL('https://accounts.google.com')).proxyOrigin}/o/oauth2" allow="clipboard-read *; clipboard-write *"></iframe>`);
-	eq('_rewriteIframeSrcs merges existing allow, upgrades bare or subdomain-wildcard origin, respects explicit none, ignores allowfullscreen',
-		irp._rewriteIframeSrcs(
-			'<iframe allowfullscreen allow="fullscreen; clipboard-write" src="https://site.test/v"></iframe>' +
-			'<iframe allow="clipboard-write https://*.google.com; clipboard-read \'src\'" src="https://accounts.google.com/o"></iframe>' +
-			'<iframe allow="clipboard-write \'none\'" src="https://site.test/w"></iframe>',
-			TARGET
-		),
-		'<iframe allowfullscreen allow="fullscreen; clipboard-write *; clipboard-read *" src="/v"></iframe>' +
-		`<iframe allow="clipboard-write *; clipboard-read *" src="${irp._registerTarget(new URL('https://accounts.google.com')).proxyOrigin}/o"></iframe>` +
-		'<iframe allow="clipboard-write \'none\'; clipboard-read *" src="/w"></iframe>');
-	eq('_rewriteIframeSrcs delegates allow on /p/ prefix & root-relative, leaves srcdoc, about:blank, javascript:, data-src, bare alone',
+		`<iframe src="${irp._registerTarget(new URL('https://accounts.google.com')).proxyOrigin}/o/oauth2"></iframe>`);
+	eq('_rewriteIframeSrcs leaves /p/ prefix, root-relative, srcdoc, about:blank, javascript:, data-src, bare alone',
 		irp._rewriteIframeSrcs(
 			`<iframe src="/p/${IR_TOK}/https/site.test/x"></iframe>` +
 			'<iframe src="/already"></iframe>' +
@@ -661,8 +659,8 @@ eq('pathMatch /foo vs /foo is true', pathMatch('/foo', '/foo'), true);
 			'<iframe></iframe>',
 			TARGET
 		),
-		`<iframe src="/p/${IR_TOK}/https/site.test/x" allow="clipboard-read *; clipboard-write *"></iframe>` +
-		'<iframe src="/already" allow="clipboard-read *; clipboard-write *"></iframe>' +
+		`<iframe src="/p/${IR_TOK}/https/site.test/x"></iframe>` +
+		'<iframe src="/already"></iframe>' +
 		'<iframe srcdoc="<p>hi</p>"></iframe>' +
 		'<iframe src="about:blank"></iframe>' +
 		'<iframe src="javascript:void(0)"></iframe>' +
@@ -674,37 +672,32 @@ eq('pathMatch /foo vs /foo is true', pathMatch('/foo', '/foo'), true);
 
 	// Child iframe rewrite is always enabled in _injectShimTag
 	const enabledHtml = irp._injectShimTag(Buffer.from('<head></head><iframe src="https://site.test/sub"></iframe>'), TARGET, undefined).html.toString('utf8');
-	ok('_injectShimTag rewrites same-origin iframe in HTML', enabledHtml.includes('<iframe src="/sub" allow="clipboard-read *; clipboard-write *">'), enabledHtml);
+	ok('_injectShimTag rewrites same-origin iframe in HTML', enabledHtml.includes('<iframe src="/sub">'), enabledHtml);
 
 	// Shipped SHIM_JS assertions
-	for (const token of ['MutationObserver', 'attributeFilter:["src"]', 'HTMLIFrameElement', 'HTMLFrameElement']) {
+	for (const token of ['MutationObserver', 'attributeFilter:["src","srcdoc"]', 'HTMLIFrameElement', 'HTMLFrameElement']) {
 		ok('SHIM_JS includes ' + token, SHIM_JS.includes(token));
 	}
 
-	// Execute SHIM_JS to test P2 (src/allow setters + unified setAttribute) & P3 (relay)
+	// Execute SHIM_JS to test P2 (src setter + unified setAttribute + same-origin srcdoc/about:blank patching) & P3 (relay)
 	const posted = [];
 	const listeners = {};
 	function Document() {}
 	Document.prototype.execCommand = () => false;
-	function Element() { this._attrs = {}; }
+	function Element() { this._attrs = {}; this._listeners = {}; }
 	Element.prototype.getAttribute = function (k) { const lk = String(k).toLowerCase(); return Object.prototype.hasOwnProperty.call(this._attrs, lk) ? this._attrs[lk] : null; };
+	Element.prototype.hasAttribute = function (k) { return Object.prototype.hasOwnProperty.call(this._attrs, String(k).toLowerCase()); };
 	Element.prototype.setAttribute = function (k, v) { this._attrs[String(k).toLowerCase()] = String(v); };
+	Element.prototype.addEventListener = function (ev, fn) { (this._listeners[ev] = this._listeners[ev] || []).push(fn); };
 	function HTMLIFrameElement() { Element.call(this); }
 	HTMLIFrameElement.prototype = Object.create(Element.prototype);
 	HTMLIFrameElement.prototype.tagName = 'IFRAME';
 	let rawSrc = '';
-	let allowAtSrcAssign = null;
 	Object.defineProperty(HTMLIFrameElement.prototype, 'src', {
 		configurable: true,
 		enumerable: true,
 		get() { return rawSrc; },
-		set(v) { allowAtSrcAssign = this._attrs.allow || null; rawSrc = v; this._attrs.src = String(v); },
-	});
-	Object.defineProperty(HTMLIFrameElement.prototype, 'allow', {
-		configurable: true,
-		enumerable: true,
-		get() { return this._attrs.allow || ''; },
-		set(v) { this._attrs.allow = String(v); },
+		set(v) { rawSrc = v; this._attrs.src = String(v); },
 	});
 	const doc = new Document();
 	doc.currentScript = {
@@ -733,29 +726,31 @@ eq('pathMatch /foo vs /foo is true', pathMatch('/foo', '/foo'), true);
 	vm.runInContext(SHIM_JS, ctx);
 	const vmWindow = vm.runInContext('window', ctx);
 
-	// P2: HTMLIFrameElement.prototype.src & .allow setters + unified Element.prototype.setAttribute
+	// P2: HTMLIFrameElement.prototype.src setter + unified Element.prototype.setAttribute + srcdoc patching
 	const frameEl = new HTMLIFrameElement();
 	frameEl.src = 'https://site.test/embed?a=1';
 	eq('SHIM_JS HTMLIFrameElement.src setter rewrites same-origin to root-relative', rawSrc, '/embed?a=1');
-	eq('SHIM_JS sets wildcard clipboard allow BEFORE assigning iframe.src',
-		allowAtSrcAssign, 'clipboard-read *; clipboard-write *');
-	frameEl.allow = 'fullscreen';
-	eq('SHIM_JS HTMLIFrameElement.allow setter preserves clipboard delegation when assigned after src',
-		frameEl.getAttribute('allow'), 'fullscreen; clipboard-read *; clipboard-write *');
-	frameEl._attrs.allow = 'fullscreen; clipboard-write https://*.other.test';
 	frameEl.src = 'https://other.test/embed';
 	eq('SHIM_JS HTMLIFrameElement.src setter rewrites cross-origin via prefix',
 		rawSrc, 'http://127.0.0.1:4599/p/' + TOKEN + '/https/other.test/embed');
-	eq('SHIM_JS upgrades subdomain-wildcard allow before cross-origin src navigation',
-		allowAtSrcAssign, 'fullscreen; clipboard-write *; clipboard-read *');
 
 	const frameAttrEl = new HTMLIFrameElement();
 	frameAttrEl.setAttribute('src', 'https://other.test/via-attr');
-	frameAttrEl.setAttribute('allow', 'autoplay');
 	eq('SHIM_JS unified setAttribute rewrites iframe src',
 		frameAttrEl.getAttribute('src'), 'http://127.0.0.1:4599/p/' + TOKEN + '/https/other.test/via-attr');
-	eq('SHIM_JS unified setAttribute preserves clipboard delegation when allow is set after src',
-		frameAttrEl.getAttribute('allow'), 'autoplay; clipboard-read *; clipboard-write *');
+
+	const srcdocEl = new HTMLIFrameElement();
+	let docClickCount = 0;
+	const childSameOriginWin = { navigator: {}, document: { addEventListener() { docClickCount++; } } };
+	srcdocEl.contentWindow = childSameOriginWin;
+	srcdocEl.setAttribute('srcdoc', '<button>Copy</button>');
+	// Simulate Chromium replacing contentWindow.document when srcdoc commits on load:
+	childSameOriginWin.document = { addEventListener() { docClickCount++; } };
+	for (const fn of srcdocEl._listeners.load || []) fn();
+	childSameOriginWin.navigator.clipboard.writeText('from-srcdoc-frame');
+	ok('SHIM_JS patches same-origin srcdoc iframe contentWindow clipboard',
+		posted.some((m) => m.type === 'copy' && m.text === 'from-srcdoc-frame'), posted);
+	eq('SHIM_JS re-attaches click listener when srcdoc replaces contentWindow.document', docClickCount, 2);
 
 	const scriptEl = new Element();
 	scriptEl.tagName = 'SCRIPT';
@@ -781,6 +776,64 @@ eq('pathMatch /foo vs /foo is true', pathMatch('/foo', '/foo'), true);
 	eq('SHIM_JS never relays child pageNavigated', posted.some((m) => m.type === 'pageNavigated'), false);
 	eq('SHIM_JS ignores message from self', posted.some((m) => m.url === 'https://self-loop.test/'), false);
 }
+
+// ---------------------------------------------------------------------------
+// Live HTTP checks: stale-token __bp_shim.js & HTML cache-control: no-store
+// ---------------------------------------------------------------------------
+globalThis.__shimChecks = Promise.resolve(globalThis.__shimChecks).then(async () => {
+	const http = require('node:http');
+	const upstream = http.createServer((req, res) => {
+		res.writeHead(200, {
+			'content-type': 'text/html; charset=utf-8',
+			'cache-control': 'public, max-age=86400',
+			etag: '"upstream-etag"',
+			'last-modified': 'Wed, 21 Oct 2026 07:28:00 GMT',
+			expires: 'Thu, 22 Oct 2026 07:28:00 GMT',
+		});
+		res.end('<!doctype html><html><head></head><body>ok</body></html>');
+	});
+	await new Promise((r) => upstream.listen(0, '127.0.0.1', r));
+	const upPort = upstream.address().port;
+	const liveProxy = new FrameProxy(new CookieJar(), { preferredPort: 0 });
+	await liveProxy.start();
+	try {
+		const fetchRaw = (urlPath, hostHdr) => new Promise((resolve, reject) => {
+			http.get({
+				host: '127.0.0.1',
+				port: liveProxy.port,
+				path: urlPath,
+				headers: hostHdr ? { host: hostHdr } : {},
+			}, (res) => {
+				const chunks = [];
+				res.on('data', (c) => chunks.push(c));
+				res.on('end', () => resolve({
+					status: res.statusCode,
+					headers: res.headers,
+					body: Buffer.concat(chunks).toString('utf8'),
+				}));
+			}).on('error', reject);
+		});
+
+		const { proxyOrigin } = liveProxy._registerTarget(new URL(`http://127.0.0.1:${upPort}`));
+		const entryUrl = new URL(`${proxyOrigin}/page`);
+
+		const loopbackStaleShim = await fetchRaw('/p/stale050token/__bp_shim.js?bp=%7B%7D');
+		eq('stale-token __bp_shim.js on bare loopback returns 404 (no probing)', loopbackStaleShim.status, 404);
+
+		const targetStaleShim = await fetchRaw('/p/stale050token/__bp_shim.js?bp=%7B%7D', entryUrl.host);
+		eq('stale-token __bp_shim.js on registered target origin returns 200 OK', targetStaleShim.status, 200);
+		eq('stale-token __bp_shim.js serves pure SHIM_JS without leaking secret token', targetStaleShim.body, SHIM_JS);
+
+		const htmlRes = await fetchRaw(entryUrl.pathname, entryUrl.host);
+		eq('injected HTML sets cache-control: no-store', htmlRes.headers['cache-control'], 'no-store');
+		eq('injected HTML strips upstream etag', 'etag' in htmlRes.headers, false);
+		eq('injected HTML strips upstream last-modified', 'last-modified' in htmlRes.headers, false);
+		eq('injected HTML strips upstream expires', 'expires' in htmlRes.headers, false);
+	} finally {
+		liveProxy.dispose();
+		upstream.close();
+	}
+});
 
 // ---------------------------------------------------------------------------
 // isLocalDevHost: self-signed TLS tolerance is strictly scoped to local/LAN hosts.

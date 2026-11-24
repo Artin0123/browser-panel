@@ -106,17 +106,19 @@ for (const good of ['http://example.com/', 'https://example.com/', 'http://127.0
   check('gate passes ' + good, isFrameSrc(good) === true);
 }
 
-// #browser-frame must delegate Permissions-Policy with '*' (not bare 'src',
-// which breaks after the 302 bounce from 127.0.0.1 to t-<hash>.localhost or any
-// cross-origin redirect).
+// #browser-frame delegates fullscreen with '*' and intentionally does NOT
+// delegate clipboard-read / clipboard-write (Electron's main process blocks
+// native Clipboard API on all non-vscode-webview origins anyway; delegating
+// Permissions-Policy only hides Blink's [Violation] error when unshimmed).
 const htmlSource = fs.readFileSync(path.join(__dirname, '..', 'src', 'webview', 'index.html'), 'utf8');
 const frameTag = (htmlSource.match(/<iframe\b[^>]*\bid="browser-frame"[^>]*>/i) || [''])[0];
 const allowAttr = (frameTag.match(/\ballow="([^"]*)"/i) || ['', ''])[1];
-for (const directive of ['clipboard-read *', 'clipboard-write *', 'fullscreen *']) {
-  check('#browser-frame allow delegates ' + directive,
-    allowAttr.split(';').map((s) => s.trim()).includes(directive),
-    'got allow="' + allowAttr + '"');
-}
+check('#browser-frame allow delegates fullscreen *',
+  allowAttr.split(';').map((s) => s.trim()).includes('fullscreen *'),
+  'got allow="' + allowAttr + '"');
+check('#browser-frame allow does not mask clipboard Permissions-Policy errors',
+  !/clipboard-(read|write)/i.test(allowAttr),
+  'got allow="' + allowAttr + '"');
 
 console.log('webview units: ' + (checks - failed) + '/' + checks + ' checks passed');
 process.exit(failed ? 1 : 0);

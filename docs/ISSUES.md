@@ -15,7 +15,7 @@
 | 3 | 狀態儲存範圍 | **三鍵（`lastUrl` / `history` / `closed`）皆存 `globalState`**，跨工作區共用、不遷移舊資料（2026-11-16 修訂，見 [GLOBAL-STORAGE-DESIGN.md](GLOBAL-STORAGE-DESIGN.md)）。 |
 | 4 | 自動重連範圍 | **A：僅連線失敗**（`ok: false`）。`frameBlocked`（禁內嵌）不自動重試。 |
 | 5 | 重連節奏 | **A：固定 10 秒**倒數；僅「取消自動重試」（與錯誤頁其他按鈕同款 `empty-btn`）；換網址／關閉／隱藏錯誤頁即停。工具列重新整理仍可手動重試。 |
-| 6 | 剪貼簿 | **B**：iframe 加 `allow="clipboard-read *; clipboard-write *; fullscreen *"`（跨源重定向與 `t-<id>.localhost` 仍保留政策）；**可靠寫入路徑需 `proxyEnabled`**：shim 在政策禁止時直接走 `copyText`、否則於原生寫入拒絕時轉送 `vscode.env.clipboard.writeText`。直連跨來源無法注入 shim（遇目標站自帶封鎖標頭或 Electron 宿主權限拒絕時仍受限）。 |
+| 6 | 剪貼簿 | **B（經 0.5.2 修正）**：VS Code Electron 主行程對所有 `http(s)://` 來源硬性拒絕原生 `navigator.clipboard` 寫入，故 `#browser-frame` 保留 `allow="camera; microphone; geolocation; fullscreen *"`（刻意移除 `clipboard-*` 以免靜默吞掉錯誤）；**可靠寫入路徑由 `proxyEnabled` 的 `SHIM_JS` 直接攔截** `writeText`／`write`／`execCommand('copy')`（含同源 `srcdoc`／`about:blank` 子框架）並經 `postMessage` → `vscode.env.clipboard.writeText` 寫入系統剪貼簿。 |
 | 7–8 | 頁內另開分頁 | **等同選單「在外部瀏覽器開啟」**：經同一條 `openExternal` → `vscode.env.openExternal`。僅 **`browser.proxyEnabled`** 時以**外部 shim 腳本**攔截 `window.open` 與 `a[target=_blank]`。未開 proxy 請用選單。 |
 
 ---
@@ -45,9 +45,9 @@
 
 ### 3. 實作（對應定案 6、7–8）
 
-1. `#browser-frame` 加上 `allow="clipboard-read *; clipboard-write *; fullscreen *"`（必須帶 `*`，否則預設 `'src'` 會在代理 `302` 跳往 `t-<12hex>.localhost:<port>` 後失去權限；若上游另設 `Permissions-Policy` 擋寫入，shim 會預先檢查並略過原生呼叫以避開 `[Violation]` 警告）。
+1. `#browser-frame` 設為 `allow="camera; microphone; geolocation; fullscreen *"`（刻意不轉授 `clipboard-read`／`clipboard-write`：Electron 主行程無論如何都會擋下 `http(s)://` 的原生剪貼簿寫入，轉授 `allow` 只會消音 Blink `[Violation]` 診斷卻無法讓原生寫入成功）。
 2. Webview 監聽 iframe `postMessage`：`openExternal` → Host；`copy` → Host `copyText` → `vscode.env.clipboard.writeText`。
-3. Proxy：對 `text/html` 注入 `<script src="/p/<token>/__bp_shim.js">`；shim 攔截 `window.open`／`target=_blank`，以及 `clipboard.writeText` 的 `NotAllowedError` 後轉送父層。**不做** `<base>`／路徑改寫。
+3. Proxy：對 `text/html`（強制 `cache-control: no-store` 且相容跨重啟舊 token 的 `/p/<token>/__bp_shim.js`）注入外掛腳本；shim 直接接管 `Clipboard.prototype` 與 `navigator.clipboard` 的 `writeText`／`write` 及 `document.execCommand('copy')`（含 `copy-to-clipboard` 的 `clipboardData.setData` 與同源 `srcdoc` 子框架），不經過必敗的原生寫入。**不做** `<base>`／路徑改寫。
 
 典型錯誤（需 proxy shim 才能救）：
 
